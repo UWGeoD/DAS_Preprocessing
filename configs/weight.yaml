@@ -1,0 +1,8 @@
+data_dir: data
+labels_csv: weight_labels.csv
+
+batch_size: 4
+lr: 7.0e-4
+epochs: 140
+
+save_dir: results/weight

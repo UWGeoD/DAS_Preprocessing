@@ -1,0 +1,37 @@
+data_dir: data
+labels_csv: labels.csv
+
+# Physical sensor parameters — update these to match your DAS hardware.
+# dx and dt are used by fk_filter. Set dt: null to default to 1/fs.
+fs: 2000
+dx: 1.0
+dt: null
+
+# Train/val/test split
+# n_train samples are taken first; the remainder is split evenly between val and test.
+n_train: 40
+
+batch_size: 2
+lr: 6.0e-6
+epochs: 100
+
+# After training, run inference on all data/sample_*.npy and write to data/denoised/
+save_denoised: true
+
+save_dir: results/denoising
+
+steps:
+  - name: detrend
+    axis: 1
+  - name: bandpass
+    f_lo: 0.5
+    f_hi: 30.0
+    order: 2
+    axis: 1
+    zero_phase: true
+  - name: fk_filter
+    fmin: null
+    fmax: null
+    vmin: 10.0
+    vmax: 60.0
+    taper: 0.05

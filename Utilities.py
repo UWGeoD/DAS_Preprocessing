@@ -9,30 +9,89 @@ import re
 epsilon = 1e-8
 normalize = lambda x: (x - np.mean(x, axis=-1, keepdims=True)) / (np.std(x, axis=-1, keepdims=True) + epsilon)
 
-def plot_das_data(data, channels, dx, dt, start_time=None, end_time=None, title=None):
+def plot_das_data(data, channels, dx, dt,
+                  start_time=None, end_time=None,
+                  title=None,
+                  ax=None, fig=None, show=True):
+    """
+    If ax is provided, draw into that axes.
+    Otherwise create a new fig, ax.
+
+    Returns (fig, ax).
+    """
     x = np.asarray(channels) * dx
     t = np.arange(data.shape[1]) * dt
+
     if start_time is not None and end_time is not None:
         mask = (t >= start_time) & (t <= end_time)
-        data = data[:, mask]; t = t[mask]
-    fig, ax = plt.subplots(figsize=(10,5))
-    ax.imshow(normalize(data).T, cmap="seismic", vmin=-1, vmax=1, aspect="auto",
-              extent=[x[0], x[-1], t[-1], t[0]], interpolation="none", animated=True, zorder=1)
-    ax.set_xlim(x[0], x[-1]); ax.set_ylim(t[-1], t[0])
-    ax.set_xlabel("Channel Position (m)"); ax.set_ylabel("Time (s)")
-    if title: ax.set_title(title)
-    fig.tight_layout(pad=0.7); fig.show()
+        data = data[:, mask]
+        t = t[mask]
+
+    # Create fig/ax if not provided
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+    elif fig is None:
+        fig = ax.figure
+
+    ax.imshow(
+        normalize(data).T,
+        #data.T,
+        cmap="seismic",
+        #cmap="binary",
+        vmin=-1,
+        vmax=1,
+        aspect="auto",
+        extent=[x[0], x[-1], t[-1], t[0]],
+        interpolation="none",
+        animated=True,
+        zorder=1,
+    )
+    ax.set_xlim(x[0], x[-1])
+    ax.set_ylim(t[-1], t[0])
+    ax.set_xlabel("Channel Position (m)")
+    ax.set_ylabel("Time (s)")
+    if title:
+        ax.set_title(title)
+
+    fig.tight_layout(pad=0.7)
+    if show:
+        plt.show()
+
     return fig, ax
 
-def plot_single(data, channel_num, dx, dt, start_time=None, end_time=None):
+
+def plot_single(
+    data, channel_num, dx, dt,
+    start_time=None, end_time=None,
+    ax=None, show=True
+):
     t = np.arange(data.shape[1]) * dt
     sig = data[channel_num]
+
     if start_time is not None and end_time is not None:
-        m = (t >= start_time) & (t <= end_time); t = t[m]; sig = sig[m]
+        m = (t >= start_time) & (t <= end_time)
+        t = t[m]
+        sig = sig[m]
+
     import matplotlib.pyplot as plt
-    plt.figure(figsize=(10,4)); plt.plot(t, sig, color="black")
-    plt.title(f"Channel {channel_num} (Position: {channel_num*dx:.2f} m)")
-    plt.xlabel("Time (s)"); plt.ylabel("Amplitude"); plt.grid(True); plt.tight_layout(); plt.show()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 4))
+    else:
+        fig = ax.figure
+
+    ax.plot(t, sig, color="black")
+    ax.set_title(f"Channel {channel_num} (Position: {channel_num*dx:.2f} m)")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude")
+    ax.grid(True)
+
+    if show:
+        fig.tight_layout()
+        plt.show()
+
+    return fig, ax
+
 
 def downsample_data(data, original_fs, target_fs):
     if target_fs >= original_fs:
@@ -41,5 +100,3 @@ def downsample_data(data, original_fs, target_fs):
         raise ValueError("Original fs must be divisible by target fs for integer decimation.")
     q = int(original_fs / target_fs)
     return signal.decimate(data, q, axis=1, zero_phase=True)
-
-# ... (create_time_file_dict, parse_datetime_from_filename, etc., same as you already have)

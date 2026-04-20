@@ -214,12 +214,10 @@ class DAS:
                 "raw_shape": tuple(raw_ds.shape),  # original (time, locus)
             })
 
-    # ----------------------
-    # Plot wrappers (unchanged)
-    # ----------------------
+
     def plot(self, start_time=None, end_time=None, title=None, preprocess=None, target_fs=None):
         from preprocessing import make_preprocess
-        default_pp = make_preprocess(f_lo=1.0, f_hi=20.0, order=5)
+        default_pp = make_preprocess(f_lo=1, f_hi=15.0, order=5)
 
         data = default_pp(self.data, self.meta["fs"]) if preprocess is None else preprocess(self.data, self.meta["fs"])
         if target_fs is not None:

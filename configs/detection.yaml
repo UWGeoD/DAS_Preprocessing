@@ -1,0 +1,17 @@
+data_dir: data
+labels_csv: corrected_labels.csv
+
+batch_size: 8
+lr: 1.0e-4
+epochs: 70
+
+# Combined loss = weight_count * MSE(count) + weight_type * CrossEntropy(type)
+weight_count: 1.0
+weight_type: 0.5
+
+# DASCountTransformer hyperparameters
+d_model: 64
+nhead: 4
+num_layers: 2
+
+save_dir: results/detection

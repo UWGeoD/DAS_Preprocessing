@@ -5,3 +5,4 @@ h5py>=3.8
 tzlocal>=5.0
 jupyterlab>=4.0
 pandas>=2.0
+pyyaml>=6.0
