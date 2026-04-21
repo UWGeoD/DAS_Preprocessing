@@ -9,7 +9,9 @@ A Python toolkit for loading, preprocessing, and running ML on **Distributed Aco
 ```
 HDF5 Files → DAS.py (loading) → preprocessing.py (signal processing)
     → data_prep.ipynb (windowing + labeling) → dataset.py (PyTorch)
-    → train.py (denoising → detection / weight regression)
+    → train.py --task denoising  →  predict.py --task denoising  (→ data/denoised/)
+    → train.py --task detection / weight
+    → eval_*.ipynb (load saved model + test split → visualize)
 ```
 
 **Tasks:**
@@ -57,16 +59,19 @@ cp config.example.py config.py
 
 Run `data_prep.ipynb` to window the DAS array and generate `data/raw/sample_XXXXXX.npy` + `data/labels.csv`.
 
-### 2. Train models
+### 2. Train and run inference
 
 ```bash
-# Step 1: train denoiser (also saves denoised samples to data/denoised/)
+# Step 1: train denoiser
 python train.py --task denoising
 
-# Step 2a: train vehicle detector
+# Step 2: generate denoised samples (required before detection/weight training)
+python predict.py --task denoising        # writes data/denoised/
+
+# Step 3a: train vehicle detector
 python train.py --task detection
 
-# Step 2b: train weight regressor
+# Step 3b: train weight regressor
 python train.py --task weight
 ```
 
@@ -75,14 +80,21 @@ Override config values from the CLI:
 python train.py --task detection --epochs 100 --lr 5e-4
 ```
 
-All hyperparameters live in `configs/<task>.yaml`. Trained models are saved to `results/<task>/best_model.pt`.
+All hyperparameters live in `configs/<task>.yaml`. Each run saves `results/<task>/best_model.pt` and `results/<task>/splits.json` (exact train/val/test sample IDs).
 
-### 3. Visualize results
+### 3. Run inference on new data
 
-Open the corresponding notebook for a trained model:
-- `train_denoising.ipynb` — compare raw / preprocessed / UNet output
-- `train_detection.ipynb` — per-sample predictions with count & type metrics
-- `train_weight_predicting.ipynb` — predicted vs. actual weight plots
+```bash
+python predict.py --task detection --input data/denoised/denoised_sample_000042.npy
+python predict.py --task weight    --input data/denoised/denoised_sample_000042.npy
+```
+
+### 4. Visualize results
+
+Open the eval notebook for a trained model — it loads `splits.json` to use the exact same test set:
+- `eval_denoising.ipynb` — raw / preprocessed / UNet output comparison
+- `eval_detection.ipynb` — per-sample predictions with count & type metrics
+- `eval_weight.ipynb` — predicted vs. actual weight
 
 ---
 
@@ -94,7 +106,8 @@ DAS_Preprocessing/
 ├── preprocessing.py        # Composable signal processing (detrend, bandpass, f-k, curvelet)
 ├── dataset.py              # PyTorch Datasets: DASSampleDataset, DASCountDataset, DASWeightDataset
 ├── Utilities.py            # Visualization helpers (plot_das_data, plot_single)
-├── train.py                # Unified training CLI
+├── train.py                # Unified training CLI (saves model + splits.json)
+├── predict.py              # Inference CLI (denoising batch / detection / weight)
 ├── configs/
 │   ├── denoising.yaml
 │   ├── detection.yaml
@@ -106,9 +119,9 @@ DAS_Preprocessing/
 │   └── weight_cnn.py       # DASWeightCNN
 ├── data_prep.ipynb         # Label windows and export .npy samples
 ├── demo.ipynb              # Quickstart: load, inspect, and visualize DAS data
-├── train_denoising.ipynb   # Visualization notebook for denoising model
-├── train_detection.ipynb   # Visualization notebook for detection model
-├── train_weight_predicting.ipynb  # Visualization notebook for weight model
+├── eval_denoising.ipynb    # Eval notebook: load model + test split, visualize denoising
+├── eval_detection.ipynb    # Eval notebook: load model + test split, visualize detection
+├── eval_weight.ipynb       # Eval notebook: load model + test split, visualize weight
 ├── config.example.py       # Template for local paths
 └── requirements.txt
 ```
