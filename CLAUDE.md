@@ -84,11 +84,11 @@ python predict.py --task weight    --input sample.npy        # prints weight lbs
 
 Notebooks are for **data preparation and visualization only** — never for training:
 
-- **[data_prep.ipynb](data_prep.ipynb)** — Creates labeled samples: maps video frame labels → DAS time windows → `data/raw/sample_XXXXXX.npy` + `data/labels.csv`.
-- **[demo.ipynb](demo.ipynb)** — Quickstart: load, inspect, preprocess, and visualize DAS files.
-- **[eval_denoising.ipynb](eval_denoising.ipynb)** — Loads trained UNet + test split → shows raw / preprocessed / denoised comparisons.
-- **[eval_detection.ipynb](eval_detection.ipynb)** — Loads trained DASCountTransformer + test split → shows per-sample predictions and metrics.
-- **[eval_weight.ipynb](eval_weight.ipynb)** — Loads trained DASWeightCNN + test split → shows predicted vs. actual weight.
+- **[notebooks/data_prep.ipynb](notebooks/data_prep.ipynb)** — Creates labeled samples: maps video frame labels → DAS time windows → `data/raw/sample_XXXXXX.npy` + `data/labels.csv`.
+- **[notebooks/demo.ipynb](notebooks/demo.ipynb)** — Quickstart: load, inspect, preprocess, and visualize DAS files.
+- **[notebooks/eval_denoising.ipynb](notebooks/eval_denoising.ipynb)** — Loads trained UNet + test split → shows raw / preprocessed / denoised comparisons.
+- **[notebooks/eval_detection.ipynb](notebooks/eval_detection.ipynb)** — Loads trained DASCountTransformer + test split → shows per-sample predictions and metrics.
+- **[notebooks/eval_weight.ipynb](notebooks/eval_weight.ipynb)** — Loads trained DASWeightCNN + test split → shows predicted vs. actual weight.
 
 ### Key Patterns
 

@@ -92,9 +92,9 @@ python predict.py --task weight    --input data/denoised/denoised_sample_000042.
 ### 4. Visualize results
 
 Open the eval notebook for a trained model — it loads `splits.json` to use the exact same test set:
-- `eval_denoising.ipynb` — raw / preprocessed / UNet output comparison
-- `eval_detection.ipynb` — per-sample predictions with count & type metrics
-- `eval_weight.ipynb` — predicted vs. actual weight
+- `notebooks/eval_denoising.ipynb` — raw / preprocessed / UNet output comparison
+- `notebooks/eval_detection.ipynb` — per-sample predictions with count & type metrics
+- `notebooks/eval_weight.ipynb` — predicted vs. actual weight
 
 ---
 
@@ -117,11 +117,12 @@ DAS_Preprocessing/
 │   ├── detection_cnn.py    # DASCountCNN
 │   ├── detection_transformer.py  # DASCountTransformer
 │   └── weight_cnn.py       # DASWeightCNN
-├── data_prep.ipynb         # Label windows and export .npy samples
-├── demo.ipynb              # Quickstart: load, inspect, and visualize DAS data
-├── eval_denoising.ipynb    # Eval notebook: load model + test split, visualize denoising
-├── eval_detection.ipynb    # Eval notebook: load model + test split, visualize detection
-├── eval_weight.ipynb       # Eval notebook: load model + test split, visualize weight
+├── notebooks/
+│   ├── data_prep.ipynb     # Label windows and export .npy samples
+│   ├── demo.ipynb          # Quickstart: load, inspect, and visualize DAS data
+│   ├── eval_denoising.ipynb  # Load model + test split, visualize denoising
+│   ├── eval_detection.ipynb  # Load model + test split, visualize detection
+│   └── eval_weight.ipynb     # Load model + test split, visualize weight
 ├── config.example.py       # Template for local paths
 └── requirements.txt
 ```
