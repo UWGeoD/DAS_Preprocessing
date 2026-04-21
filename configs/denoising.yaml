@@ -15,9 +15,6 @@ batch_size: 2
 lr: 6.0e-6
 epochs: 100
 
-# After training, run inference on all data/sample_*.npy and write to data/denoised/
-save_denoised: true
-
 save_dir: results/denoising
 
 steps:

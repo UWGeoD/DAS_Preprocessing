@@ -8,7 +8,7 @@ Usage:
 
 import argparse
 import copy
-import glob
+import json
 import os
 
 import numpy as np
@@ -43,6 +43,14 @@ def apply_overrides(cfg, args):
     return cfg
 
 
+def _save_splits(save_dir, train_ids, val_ids, test_ids):
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, "splits.json")
+    with open(path, "w") as f:
+        json.dump({"train": train_ids, "val": val_ids, "test": test_ids}, f, indent=2)
+    print(f"Splits saved → {path}")
+
+
 # ---------------------------------------------------------------------------
 # Denoising
 # ---------------------------------------------------------------------------
@@ -51,6 +59,7 @@ def train_denoising(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    save_dir = cfg.get("save_dir", "results/denoising")
     data_dir = cfg["data_dir"]
     df = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
     df_pos = df[df["count"] > 0].sample(frac=1.0, random_state=42).reset_index(drop=True)
@@ -64,6 +73,13 @@ def train_denoising(cfg):
     val_df   = df_pos.iloc[n_train:n_train + n_val]
     test_df  = df_pos.iloc[n_train + n_val:]
     print(f"Split — Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
+
+    _save_splits(
+        save_dir,
+        train_ids=train_df["sample_id"].tolist(),
+        val_ids=val_df["sample_id"].tolist(),
+        test_ids=test_df["sample_id"].tolist(),
+    )
 
     steps = [(s["name"], {k: v for k, v in s.items() if k != "name"})
              for s in cfg["steps"]]
@@ -113,28 +129,10 @@ def train_denoising(cfg):
         model.load_state_dict(best_state)
         print(f"Best val loss: {best_val:.6f}")
 
-    save_dir = cfg.get("save_dir", "results/denoising")
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
-
-    if cfg.get("save_denoised", True):
-        _run_denoising_inference(model, device, data_dir, fs)
-
-
-def _run_denoising_inference(model, device, data_dir, fs):
-    out_dir = os.path.join(data_dir, "denoised")
-    os.makedirs(out_dir, exist_ok=True)
-    files = sorted(glob.glob(os.path.join(data_dir, "raw", "sample_*.npy")))
-    print(f"Saving denoised outputs for {len(files)} samples → {out_dir}/")
-    model.eval()
-    with torch.no_grad():
-        for fpath in files:
-            raw = np.load(fpath).astype(np.float32)
-            raw_t = torch.from_numpy(raw).unsqueeze(0).unsqueeze(0).to(device)
-            pred = model(raw_t).squeeze().cpu().numpy()
-            np.save(os.path.join(out_dir, f"denoised_{os.path.basename(fpath)}"), pred)
-    print("Done.")
+    print("Run `python predict.py --task denoising` to generate data/denoised/.")
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +154,7 @@ def train_detection(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    save_dir = cfg.get("save_dir", "results/detection")
     data_dir = cfg["data_dir"]
     df = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
     df["data_path"] = df["sample_id"].apply(
@@ -171,6 +170,13 @@ def train_detection(cfg):
         dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(42)
     )
     print(f"Split — Train: {n_train}  Val: {n_val}  Test: {n_test}")
+
+    _save_splits(
+        save_dir,
+        train_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in train_ds.indices],
+        val_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in val_ds.indices],
+        test_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in test_ds.indices],
+    )
 
     batch = cfg.get("batch_size", 8)
     train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
@@ -215,7 +221,6 @@ def train_detection(cfg):
             print(f"Epoch {epoch+1}/{cfg['epochs']} | "
                   f"Train: {running/len(train_ds):.4f} | Val: {val_loss/len(val_ds):.4f}")
 
-    save_dir = cfg.get("save_dir", "results/detection")
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
@@ -224,7 +229,7 @@ def train_detection(cfg):
 
 
 def _eval_detection(model, device, test_loader):
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, accuracy_score
+    from sklearn.metrics import mean_absolute_error, accuracy_score
 
     model.eval()
     act_counts, pred_counts, act_types, pred_types = [], [], [], []
@@ -257,6 +262,7 @@ def train_weight(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    save_dir = cfg.get("save_dir", "results/weight")
     data_dir = cfg["data_dir"]
     df = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
     df["data_path"] = df["sample_id"].apply(
@@ -272,6 +278,13 @@ def train_weight(cfg):
         dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(42)
     )
     print(f"Split — Train: {n_train}  Val: {n_val}  Test: {n_test}")
+
+    _save_splits(
+        save_dir,
+        train_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in train_ds.indices],
+        val_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in val_ds.indices],
+        test_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in test_ds.indices],
+    )
 
     batch = cfg.get("batch_size", 4)
     train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
@@ -305,7 +318,6 @@ def train_weight(cfg):
             print(f"Epoch {epoch+1}/{cfg['epochs']} | "
                   f"Train: {running/len(train_ds):.4f} | Val: {val_loss/len(val_ds):.4f}")
 
-    save_dir = cfg.get("save_dir", "results/weight")
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
