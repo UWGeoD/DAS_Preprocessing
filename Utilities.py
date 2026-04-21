@@ -100,3 +100,58 @@ def downsample_data(data, original_fs, target_fs):
         raise ValueError("Original fs must be divisible by target fs for integer decimation.")
     q = int(original_fs / target_fs)
     return signal.decimate(data, q, axis=1, zero_phase=True)
+
+
+def compute_snr(window, signal_rects, win_start_frame, fps_video, fs_das):
+    """
+    Compute SNR (dB) for a 2D DAS window [channels, time].
+
+    Parameters
+    ----------
+    window          : ndarray [channels, time]
+    signal_rects    : list of [frame_start, frame_end] in global video frame numbers
+                      (as stored in labels.csv, already clipped to window bounds).
+                      Pass [] for background windows — returns NaN.
+    win_start_frame : start_frame value from labels.csv for this window.
+    fps_video       : video frame rate used during data prep.
+    fs_das          : DAS sampling rate.
+
+    How it works
+    ------------
+    1. Each [frame_start, frame_end] rect is converted to within-window DAS sample
+       indices: i = (frame - win_start_frame) / fps_video * fs_das.
+    2. A boolean mask over the time axis is built by OR-ing all rect ranges.
+       Overlapping rects are handled automatically — e.g. [1,3] and [2,4]
+       both set their index ranges to True, giving a union of [1,4] with no
+       sample counted twice.
+    3. Signal region  = window[:, signal_mask]  (all channels, signal time)
+       Noise region   = window[:, ~signal_mask] (all channels, remaining time)
+    4. SNR = 10 * log10( mean(signal^2) / mean(noise^2) )
+       Mean is taken over all elements (channels × time) in each region.
+    """
+    if not signal_rects:
+        return float("nan")
+
+    n_time = window.shape[1]
+    signal_mask = np.zeros(n_time, dtype=bool)
+
+    for rect_s, rect_e in signal_rects:
+        i_s = int((rect_s - win_start_frame) / fps_video * fs_das)
+        i_e = int((rect_e - win_start_frame) / fps_video * fs_das)
+        i_s = max(0, i_s)
+        i_e = min(n_time, i_e)
+        if i_s < i_e:
+            signal_mask[i_s:i_e] = True  # union: overlapping ranges set same bits
+
+    noise_mask = ~signal_mask
+
+    if not signal_mask.any() or not noise_mask.any():
+        return float("nan")
+
+    signal_power = np.mean(window[:, signal_mask] ** 2)
+    noise_power = np.mean(window[:, noise_mask] ** 2)
+
+    if noise_power < 1e-12:
+        return float("inf")
+
+    return 10 * np.log10(signal_power / noise_power)

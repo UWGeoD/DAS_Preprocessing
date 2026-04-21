@@ -1,0 +1,27 @@
+# DAS acquisition
+fs_das: 2000
+channel_start: 26
+channel_end: 60
+
+# Video / time-alignment
+fps_video: 29.98762733
+frame_ref: 115
+sys_time_ref_hms: "10:27:09"
+das_start_hms: "10:24:47"
+
+# Bridge geometry + speed estimate (for frame_end_bridge)
+estimate_speed_mph: 70
+side_length_ft: 20
+bridge_length_m: 35
+
+# Windowing
+window_length_s: 5.0
+stride_s: 1.0
+
+# Output paths (relative to project root)
+out_dir: data/raw
+csv_out: ../labels.csv
+
+# Label tokens
+multi_token: mixed
+none_token: background

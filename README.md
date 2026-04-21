@@ -8,9 +8,10 @@ A Python toolkit for loading, preprocessing, and running ML on **Distributed Aco
 
 ```
 HDF5 Files → DAS.py (loading) → preprocessing.py (signal processing)
-    → data_prep.ipynb (windowing + labeling) → dataset.py (PyTorch)
+    → prepare_data.py (windowing + labeling) → dataset.py (PyTorch)
     → train.py --task denoising  →  predict.py --task denoising  (→ data/denoised/)
     → train.py --task detection / weight
+    → compute_metrics.py (SNR: raw vs pp vs denoised)
     → eval_*.ipynb (load saved model + test split → visualize)
 ```
 
@@ -57,7 +58,11 @@ cp config.example.py config.py
 
 ### 1. Prepare training data
 
-Run `data_prep.ipynb` to window the DAS array and generate `data/raw/sample_XXXXXX.npy` + `data/labels.csv`.
+```bash
+python prepare_data.py
+```
+
+Windows the DAS array, maps vehicle labels, and generates `data/raw/sample_XXXXXX.npy` + `data/labels.csv` (including per-window `signal_rects` for SNR evaluation). Hyperparameters live in `configs/data_prep.yaml`; local file paths come from `config.py`.
 
 ### 2. Train and run inference
 
@@ -89,12 +94,21 @@ python predict.py --task detection --input data/denoised/denoised_sample_000042.
 python predict.py --task weight    --input data/denoised/denoised_sample_000042.npy
 ```
 
-### 4. Visualize results
+### 4. Compute SNR metrics
+
+```bash
+python compute_metrics.py          # → results/metrics.csv
+```
+
+Computes per-sample SNR (dB) for raw, preprocessed, and UNet-denoised versions of every window with a vehicle signal. Results are saved to `results/metrics.csv` for distribution analysis in `eval_metrics.ipynb`.
+
+### 5. Visualize results
 
 Open the eval notebook for a trained model — it loads `splits.json` to use the exact same test set:
-- `notebooks/eval_denoising.ipynb` — raw / preprocessed / UNet output comparison
+- `notebooks/eval_denoising.ipynb` — raw / preprocessed / UNet output comparison with SNR per subplot
 - `notebooks/eval_detection.ipynb` — per-sample predictions with count & type metrics
 - `notebooks/eval_weight.ipynb` — predicted vs. actual weight
+- `notebooks/eval_metrics.ipynb` — SNR distributions (all signal samples) and per-sample gain charts
 
 ---
 
@@ -105,10 +119,13 @@ DAS_Preprocessing/
 ├── DAS.py                  # HDF5 loader (OptaSense, Silixa); single + multi-file
 ├── preprocessing.py        # Composable signal processing (detrend, bandpass, f-k, curvelet)
 ├── dataset.py              # PyTorch Datasets: DASSampleDataset, DASCountDataset, DASWeightDataset
-├── Utilities.py            # Visualization helpers (plot_das_data, plot_single)
+├── Utilities.py            # Visualization helpers and compute_snr metric
+├── prepare_data.py         # Data prep CLI: windows DAS array → data/raw/ + data/labels.csv
 ├── train.py                # Unified training CLI (saves model + splits.json)
 ├── predict.py              # Inference CLI (denoising batch / detection / weight)
+├── compute_metrics.py      # SNR CLI: raw vs preprocessed vs denoised → results/metrics.csv
 ├── configs/
+│   ├── data_prep.yaml      # Windowing + time-alignment hyperparameters
 │   ├── denoising.yaml
 │   ├── detection.yaml
 │   └── weight.yaml
@@ -118,11 +135,12 @@ DAS_Preprocessing/
 │   ├── detection_transformer.py  # DASCountTransformer
 │   └── weight_cnn.py       # DASWeightCNN
 ├── notebooks/
-│   ├── data_prep.ipynb     # Label windows and export .npy samples
+│   ├── data_prep.ipynb     # Sanity-check: inspect labels.csv + visualize sample windows
 │   ├── demo.ipynb          # Quickstart: load, inspect, and visualize DAS data
-│   ├── eval_denoising.ipynb  # Load model + test split, visualize denoising
+│   ├── eval_denoising.ipynb  # Load model + test split, visualize denoising with SNR
 │   ├── eval_detection.ipynb  # Load model + test split, visualize detection
-│   └── eval_weight.ipynb     # Load model + test split, visualize weight
+│   ├── eval_weight.ipynb     # Load model + test split, visualize weight
+│   └── eval_metrics.ipynb    # SNR distributions and per-sample gain (all signal samples)
 ├── config.example.py       # Template for local paths
 └── requirements.txt
 ```
