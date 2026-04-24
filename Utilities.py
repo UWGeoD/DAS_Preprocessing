@@ -9,6 +9,191 @@ import re
 epsilon = 1e-8
 normalize = lambda x: (x - np.mean(x, axis=-1, keepdims=True)) / (np.std(x, axis=-1, keepdims=True) + epsilon)
 
+_PUB_COLORS = {
+    "raw":      "#d9534f",
+    "pp":       "#5bc0de",
+    "denoised": "#5cb85c",
+}
+
+_STEP_DISPLAY = {
+    "detrend":               "detrend",
+    "bandpass":              "bandpass",
+    "fk_filter":             "f-k filter",
+    "hilbert_transform":     "Hilbert",
+    "curvelet_like_denoise": "curvelet",
+}
+
+
+def _fmt_step(step):
+    """Format a step dict (or plain name str) into a human-readable label."""
+    if isinstance(step, str):
+        return _STEP_DISPLAY.get(step, step)
+    name  = step.get("name", "?")
+    label = _STEP_DISPLAY.get(name, name)
+    if name == "bandpass":
+        lo, hi = step.get("f_lo", "?"), step.get("f_hi", "?")
+        label += f" [{lo}–{hi} Hz]"
+    elif name == "fk_filter":
+        vmin, vmax = step.get("vmin"), step.get("vmax")
+        if vmin is not None and vmax is not None:
+            label += f" [{vmin:.0f}–{vmax:.0f} m/s]"
+    return label
+
+def plot_das_comparison(
+    raw, clean, denoised,
+    snr_raw, snr_clean, snr_denoised,
+    channels, dx, dt,
+    pp_steps,
+    signal_rects=None,
+    win_start_frame=None,
+    fps_video=None,
+    show_signal_shade=False,
+    show_signal_ticks=False,
+    sample_id=None,
+    figsize=(14, 9),
+):
+    """
+    Publication-quality DAS comparison figure.
+
+    Left column (3 heatmaps, shared axes):
+        Raw  ·  Preprocessed (with step labels)  ·  UNet Denoised
+    Right column (SNR panel, spans all rows):
+        Horizontal bar chart comparing SNR across the three stages,
+        ordered top-to-bottom to match the heatmap stack.
+
+    Parameters
+    ----------
+    raw, clean, denoised     : ndarray [channels, time]
+    snr_raw, snr_clean,
+      snr_denoised           : float   SNR in dB
+    channels                 : 1-D array
+    dx, dt                   : float   sample intervals (m, s)
+    pp_steps                 : list of step dicts ({"name": ...}) from denoising.yaml
+    signal_rects             : list of [frame_start, frame_end] pairs (optional)
+    win_start_frame          : int     start_frame from labels.csv
+    fps_video                : float
+    sample_id                : str/int used in the figure title
+    figsize                  : (width, height) in inches
+
+    Returns
+    -------
+    fig, (ax_raw, ax_pp, ax_den, ax_snr)
+    """
+    from matplotlib.gridspec import GridSpec
+
+    x = np.asarray(channels) * dx
+    t = np.arange(raw.shape[1]) * dt
+    extent = [x[0], x[-1], t[-1], t[0]]
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    gs  = GridSpec(3, 2, figure=fig,
+                   width_ratios=[5, 1],
+                   hspace=0.30, wspace=0.28)
+    ax_raw = fig.add_subplot(gs[0, 0])
+    ax_pp  = fig.add_subplot(gs[1, 0], sharex=ax_raw, sharey=ax_raw)
+    ax_den = fig.add_subplot(gs[2, 0], sharex=ax_raw, sharey=ax_raw)
+    ax_snr = fig.add_subplot(gs[:, 1])
+
+    _im_kw = dict(cmap="seismic", vmin=-1, vmax=1, aspect="auto",
+                  extent=extent, interpolation="none", zorder=1)
+
+    # ── Heatmap helper ────────────────────────────────────────────────────────
+    def _draw_heatmap(ax, data, method_label, color,
+                      sub_label=None, show_xlabel=False, show_ylabel=False):
+        ax.imshow(normalize(data).T, **_im_kw)
+        ax.set_xlim(x[0], x[-1])
+        ax.set_ylim(t[-1], t[0])
+        ax.tick_params(direction="in", which="both", labelsize=9)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_ylabel("Time (s)" if show_ylabel else "", fontsize=10)
+        if not show_xlabel:
+            plt.setp(ax.get_xticklabels(), visible=False)
+            ax.tick_params(bottom=False)
+        else:
+            ax.set_xlabel("Channel Position (m)", fontsize=10)
+        # method label as colored title outside the heatmap (left-aligned)
+        ax.set_title(method_label, color=color, fontsize=11,
+                     fontweight="bold", loc="left", pad=5)
+        # preprocessing step annotation — subtle dark badge at bottom-left inside heatmap
+        if sub_label:
+            ax.text(0.012, 0.03, sub_label,
+                    transform=ax.transAxes, fontsize=7.5, color="white",
+                    va="bottom", ha="left", zorder=5, style="italic",
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="black",
+                              alpha=0.45, edgecolor="none"))
+
+    pp_sub = " → ".join(_fmt_step(s) for s in pp_steps)
+    _draw_heatmap(ax_raw, raw,      "Raw",           _PUB_COLORS["raw"])
+    _draw_heatmap(ax_pp,  clean,    "Preprocessed",  _PUB_COLORS["pp"],
+                  sub_label=pp_sub, show_ylabel=True)
+    _draw_heatmap(ax_den, denoised, "UNet Denoised", _PUB_COLORS["denoised"],
+                  show_xlabel=True)
+
+    # ── Signal region overlays (each independently optional) ──────────────────
+    if signal_rects and win_start_frame is not None and fps_video is not None:
+        if show_signal_shade or show_signal_ticks:
+            for ax in (ax_raw, ax_pp, ax_den):
+                for r_s, r_e in signal_rects:
+                    t_s = (r_s - win_start_frame) / fps_video
+                    t_e = (r_e - win_start_frame) / fps_video
+                    if show_signal_shade:
+                        ax.axhspan(t_s, t_e, alpha=0.18, color="#FFA500",
+                                   zorder=2, linewidth=0)
+                    if show_signal_ticks:
+                        for t_m in (t_s, t_e):
+                            ax.axhline(t_m, xmin=0, xmax=0.025,
+                                       color="#E06600", linewidth=2.0, zorder=3)
+
+    # ── Figure title ──────────────────────────────────────────────────────────
+    sid_str = f"Sample {sample_id}" if sample_id is not None else "DAS Comparison"
+    fig.suptitle(sid_str, fontsize=13, fontweight="bold", y=0.99)
+
+    # ── SNR panel ─────────────────────────────────────────────────────────────
+    # y positions are flipped so the panel reads top-to-bottom like the heatmaps:
+    #   y=2 → Raw (top)   y=1 → Preprocessed   y=0 → UNet Denoised (bottom)
+    y_raw, y_pp, y_den = 2, 1, 0
+    snr_arr   = [snr_raw,             snr_clean,             snr_denoised]
+    color_arr = [_PUB_COLORS["raw"],  _PUB_COLORS["pp"],     _PUB_COLORS["denoised"]]
+    y_arr     = [y_raw,               y_pp,                  y_den]
+
+    for val, col, y in zip(snr_arr, color_arr, y_arr):
+        ax_snr.barh(y, val, color=col, alpha=0.88, height=0.52, edgecolor="none")
+
+    ax_snr.set_yticks([y_raw, y_pp, y_den])
+    ax_snr.set_yticklabels(["Raw", "Preprocessed", "UNet\nDenoised"], fontsize=9.5)
+    ax_snr.set_xlabel("SNR (dB)", fontsize=10)
+    ax_snr.set_title("SNR Comparison", fontsize=10.5, fontweight="semibold", pad=7)
+    ax_snr.tick_params(direction="in", labelsize=9)
+    ax_snr.spines[["top", "right"]].set_visible(False)
+    ax_snr.axvline(0, color="#aaaaaa", linewidth=0.8, linestyle="--", zorder=0)
+    ax_snr.set_ylim(-0.65, 2.7)
+
+    x_min_snr = min(0.0, min(snr_arr) - 0.3)
+    x_max_snr = max(snr_arr) * 1.62
+    ax_snr.set_xlim(left=x_min_snr, right=x_max_snr)
+    gap = (x_max_snr - x_min_snr) * 0.03
+
+    # value labels to the right of each bar
+    for val, col, y in zip(snr_arr, color_arr, y_arr):
+        ax_snr.text(max(val, 0) + gap, y,
+                    f"{val:.1f} dB",
+                    va="center", fontsize=9, fontweight="bold", color=col)
+
+    # Δ gain vs Raw — placed BELOW each bar to avoid overlap
+    for val, delta, col, y in [
+        (snr_clean,    snr_clean    - snr_raw, _PUB_COLORS["pp"],       y_pp),
+        (snr_denoised, snr_denoised - snr_raw, _PUB_COLORS["denoised"], y_den),
+    ]:
+        sign = "+" if delta >= 0 else ""
+        ax_snr.text(max(val, 0) + gap, y - 0.30,
+                    f"{sign}{delta:.1f} dB vs Raw",
+                    va="top", fontsize=7.5, color=col, style="italic")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig, (ax_raw, ax_pp, ax_den, ax_snr)
+
+
 def plot_das_data(data, channels, dx, dt,
                   start_time=None, end_time=None,
                   title=None,
