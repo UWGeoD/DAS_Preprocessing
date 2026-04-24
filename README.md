@@ -16,7 +16,7 @@ HDF5 Files → DAS.py (loading) → preprocessing.py (signal processing)
 ```
 
 **Tasks:**
-- **Denoising** — UNet trained to map raw DAS → preprocessed (clean) signal
+- **Denoising** — UNetV2 trained to map raw DAS → preprocessed (clean) signal
 - **Detection** — Transformer predicting vehicle count + type (SUV / van / sedan / truck / mixed) per window
 - **Weight** — CNN regressing vehicle weight from denoised DAS windows
 
@@ -97,10 +97,12 @@ python predict.py --task weight    --input data/denoised/denoised_sample_000042.
 ### 4. Compute SNR metrics
 
 ```bash
-python compute_metrics.py          # → results/metrics.csv
+python compute_metrics.py                                                      # → results/metrics.csv
+python compute_metrics.py --splits results/denoising/splits.json \
+                          --plot-dir results/denoising/SNR                     # + per-split SNR plots
 ```
 
-Computes per-sample SNR (dB) for raw, preprocessed, and UNet-denoised versions of every window with a vehicle signal. Results are saved to `results/metrics.csv` for distribution analysis in `eval_metrics.ipynb`.
+Computes per-sample SNR (dB) for raw, preprocessed, and UNetV2-denoised versions of every window with a vehicle signal. Results are saved to `results/metrics.csv` for distribution analysis in `eval_metrics.ipynb`. The optional `--plot-dir` flag saves boxplots and histograms broken out by train/val/test split.
 
 ### 5. Visualize results
 
@@ -130,7 +132,8 @@ DAS_Preprocessing/
 │   ├── detection.yaml
 │   └── weight.yaml
 ├── models/
-│   ├── unet.py             # UNet denoiser
+│   ├── unet_v2.py          # UNetV2 denoiser (active) — SPP bottleneck, channel attention
+│   ├── unet.py             # UNet denoiser (baseline, with Dropout2d regularization)
 │   ├── detection_cnn.py    # DASCountCNN
 │   ├── detection_transformer.py  # DASCountTransformer
 │   └── weight_cnn.py       # DASWeightCNN
