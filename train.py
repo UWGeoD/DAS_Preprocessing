@@ -6,6 +6,9 @@ Usage:
     python train.py --task denoising --config configs/denoising.yaml --epochs 50
 """
 
+import warnings
+warnings.filterwarnings("ignore", message="Pandas requires version", category=UserWarning)
+
 import argparse
 import copy
 import json
@@ -17,11 +20,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import yaml
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 from dataset import DASSampleDataset, DASCountDataset, DASWeightDataset, IDX_TO_TYPE
 from models.detection_transformer import DASCountTransformer
-from models.unet import UNet
+from models.unet_v2 import UNetV2
 from models.weight_cnn import DASWeightCNN
 from preprocessing import make_preprocess
 
@@ -51,6 +54,37 @@ def _save_splits(save_dir, train_ids, val_ids, test_ids):
     print(f"Splits saved → {path}")
 
 
+def _save_loss_plot(history, save_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    epochs = range(1, len(history["train_loss"]) + 1)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(epochs, history["train_loss"], label="Train")
+    ax.plot(epochs, history["val_loss"],   label="Val")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    out = os.path.join(save_dir, "losses.png")
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    print(f"Loss plot → {out}")
+
+
+def _correlation_loss(pred, target, eps=1e-8):
+    """1 − Pearson correlation, averaged over the batch.
+    A constant prediction gives correlation=0 → loss=1, so the model
+    cannot minimise this by predicting the target mean everywhere."""
+    p = pred.view(pred.size(0), -1)
+    t = target.view(target.size(0), -1)
+    p = p - p.mean(dim=1, keepdim=True)
+    t = t - t.mean(dim=1, keepdim=True)
+    corr = (p * t).sum(dim=1) / (p.norm(dim=1) * t.norm(dim=1) + eps)
+    return 1.0 - corr.mean()
+
+
 # ---------------------------------------------------------------------------
 # Denoising
 # ---------------------------------------------------------------------------
@@ -62,16 +96,42 @@ def train_denoising(cfg):
     save_dir = cfg.get("save_dir", "results/denoising")
     data_dir = cfg["data_dir"]
     df = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
-    df_pos = df[df["count"] > 0].sample(frac=1.0, random_state=42).reset_index(drop=True)
+    df_pos = df[df["count"] > 0].sort_values("sample_id").reset_index(drop=True)
 
-    n_train = min(cfg.get("n_train", 40), len(df_pos))
-    n_remaining = len(df_pos) - n_train
-    n_val = n_remaining // 2
-    n_test = n_remaining - n_val
+    split_mode = cfg.get("split_mode", "temporal")
+    overlap_gap = cfg.get("overlap_gap", 0)
+    n_total = len(df_pos)
+    if "train_frac" in cfg:
+        n_train = min(int(n_total * cfg["train_frac"]), n_total)
+    else:
+        n_train = min(cfg.get("n_train", 40), n_total)
 
-    train_df = df_pos.iloc[:n_train]
-    val_df   = df_pos.iloc[n_train:n_train + n_val]
-    test_df  = df_pos.iloc[n_train + n_val:]
+    if split_mode == "random":
+        rng = np.random.default_rng(cfg.get("split_seed", 42))
+        idx = rng.permutation(n_total)
+        train_idx = sorted(idx[:n_train].tolist())
+        remaining = idx[n_train:]
+        n_val = len(remaining) // 2
+        val_idx  = sorted(remaining[:n_val].tolist())
+        test_idx = sorted(remaining[n_val:].tolist())
+        train_df = df_pos.iloc[train_idx].copy()
+        val_df   = df_pos.iloc[val_idx]
+        test_df  = df_pos.iloc[test_idx]
+        print(f"Split mode: random (seed={cfg.get('split_seed', 42)})")
+    else:
+        n_pool = n_total - n_train - 2 * overlap_gap
+        n_val  = max(0, n_pool // 2)
+        train_df = df_pos.iloc[:n_train].copy()
+        val_df   = df_pos.iloc[n_train + overlap_gap : n_train + overlap_gap + n_val]
+        test_df  = df_pos.iloc[n_train + overlap_gap + n_val + overlap_gap :]
+        print(f"Split mode: temporal (overlap_gap={overlap_gap})")
+
+    # Optionally add background (count == 0) windows to training only.
+    if cfg.get("include_background", False):
+        df_bg = df[df["count"] == 0].sort_values("sample_id").reset_index(drop=True)
+        train_df = pd.concat([train_df, df_bg], ignore_index=True)
+        print(f"  + {len(df_bg)} background samples → training total: {len(train_df)}")
+
     print(f"Split — Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
 
     _save_splits(
@@ -86,18 +146,27 @@ def train_denoising(cfg):
     pp = make_preprocess(steps=steps, dx=cfg.get("dx"), dt=cfg.get("dt"))
 
     fs = cfg["fs"]
-    train_ds = DASSampleDataset(train_df, preprocess=pp, fs_das=fs)
-    val_ds   = DASSampleDataset(val_df,   preprocess=pp, fs_das=fs)
+    train_ds = DASSampleDataset(train_df, preprocess=pp, fs_das=fs, augment=True)
+    val_ds   = DASSampleDataset(val_df,   preprocess=pp, fs_das=fs, augment=False)
 
-    batch = cfg.get("batch_size", 2)
+    batch = cfg.get("batch_size", 8)
     train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False)
 
-    model     = UNet(in_channels=1, out_channels=1).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=cfg["lr"])
+    model     = UNetV2(in_channels=1, out_channels=1).to(device)
+    criterion = nn.L1Loss()
+    optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min",
+        patience=cfg.get("lr_patience", 20),
+        factor=0.5,
+        min_lr=1e-6,
+    )
+    corr_w = cfg.get("correlation_weight", 0.0)
 
     best_val, best_state = float("inf"), None
+    log_interval = cfg.get("log_interval", 10)
+    history = {"train_loss": [], "val_loss": []}
 
     for epoch in range(cfg["epochs"]):
         model.train()
@@ -105,7 +174,8 @@ def train_denoising(cfg):
         for raw_b, clean_b in train_loader:
             raw_b, clean_b = raw_b.to(device), clean_b.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(raw_b), clean_b)
+            pred = model(raw_b)
+            loss = criterion(pred, clean_b) + corr_w * _correlation_loss(pred, clean_b)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * raw_b.size(0)
@@ -116,14 +186,24 @@ def train_denoising(cfg):
         with torch.no_grad():
             for raw_b, clean_b in val_loader:
                 raw_b, clean_b = raw_b.to(device), clean_b.to(device)
-                val_loss += criterion(model(raw_b), clean_b).item() * raw_b.size(0)
+                pred = model(raw_b)
+                val_loss += (
+                    criterion(pred, clean_b) + corr_w * _correlation_loss(pred, clean_b)
+                ).item() * raw_b.size(0)
         val_loss /= len(val_ds)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+
+        scheduler.step(val_loss)
 
         if val_loss < best_val:
             best_val = val_loss
             best_state = copy.deepcopy(model.state_dict())
 
-        print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {train_loss:.6f} | Val: {val_loss:.6f}")
+        if (epoch + 1) % log_interval == 0 or epoch == cfg["epochs"] - 1:
+            lr_now = optimizer.param_groups[0]["lr"]
+            print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {lr_now:.2e}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -132,6 +212,12 @@ def train_denoising(cfg):
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
+
+    losses_path = os.path.join(save_dir, "losses.json")
+    with open(losses_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"Losses saved → {losses_path}")
+    _save_loss_plot(history, save_dir)
     print("Run `python predict.py --task denoising` to generate data/denoised/.")
 
 
@@ -161,21 +247,28 @@ def train_detection(cfg):
         lambda x: os.path.join(data_dir, "denoised", f"denoised_sample_{str(x).zfill(6)}.npy")
     )
 
+    df = df.sort_values("sample_id").reset_index(drop=True)
     dataset = DASCountDataset(df)
-    total = len(dataset)
-    n_train = int(0.7 * total)
-    n_val   = int(0.15 * total)
-    n_test  = total - n_train - n_val
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(42)
-    )
-    print(f"Split — Train: {n_train}  Val: {n_val}  Test: {n_test}")
+    overlap_gap = cfg.get("overlap_gap", 4)
+    n_total = len(df)
+    n_pool  = n_total - 2 * overlap_gap
+    n_train = int(0.7 * n_pool)
+    n_val   = int(0.15 * n_pool)
+
+    train_idx = list(range(n_train))
+    val_idx   = list(range(n_train + overlap_gap, n_train + overlap_gap + n_val))
+    test_idx  = list(range(n_train + overlap_gap + n_val + overlap_gap, n_total))
+
+    train_ds = Subset(dataset, train_idx)
+    val_ds   = Subset(dataset, val_idx)
+    test_ds  = Subset(dataset, test_idx)
+    print(f"Split — Train: {len(train_ds)}  Val: {len(val_ds)}  Test: {len(test_ds)}")
 
     _save_splits(
         save_dir,
-        train_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in train_ds.indices],
-        val_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in val_ds.indices],
-        test_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in test_ds.indices],
+        train_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in train_idx],
+        val_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in val_idx],
+        test_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in test_idx],
     )
 
     batch = cfg.get("batch_size", 8)
@@ -196,6 +289,7 @@ def train_detection(cfg):
     optimizer  = optim.Adam(model.parameters(), lr=cfg["lr"])
     w_count, w_type = cfg.get("weight_count", 1.0), cfg.get("weight_type", 0.5)
 
+    history = {"train_loss": [], "val_loss": []}
     for epoch in range(cfg["epochs"]):
         model.train()
         running = 0.0
@@ -217,6 +311,8 @@ def train_detection(cfg):
                 val_loss += (w_count * count_crit(p_count, y_count)
                              + w_type * type_crit(p_type, y_type)).item() * x.size(0)
 
+        history["train_loss"].append(running / len(train_ds))
+        history["val_loss"].append(val_loss / len(val_ds))
         if (epoch + 1) % 5 == 0 or epoch == cfg["epochs"] - 1:
             print(f"Epoch {epoch+1}/{cfg['epochs']} | "
                   f"Train: {running/len(train_ds):.4f} | Val: {val_loss/len(val_ds):.4f}")
@@ -224,6 +320,12 @@ def train_detection(cfg):
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
+
+    losses_path = os.path.join(save_dir, "losses.json")
+    with open(losses_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"Losses saved → {losses_path}")
+    _save_loss_plot(history, save_dir)
 
     _eval_detection(model, device, test_loader)
 
@@ -269,21 +371,28 @@ def train_weight(cfg):
         lambda x: os.path.join(data_dir, "denoised", f"denoised_sample_{str(x).zfill(6)}.npy")
     )
 
+    df = df.sort_values("sample_id").reset_index(drop=True)
     dataset = DASWeightDataset(df)
-    total = len(dataset)
-    n_train = int(0.7 * total)
-    n_val   = int(0.15 * total)
-    n_test  = total - n_train - n_val
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [n_train, n_val, n_test], generator=torch.Generator().manual_seed(42)
-    )
-    print(f"Split — Train: {n_train}  Val: {n_val}  Test: {n_test}")
+    overlap_gap = cfg.get("overlap_gap", 4)
+    n_total = len(df)
+    n_pool  = n_total - 2 * overlap_gap
+    n_train = int(0.7 * n_pool)
+    n_val   = int(0.15 * n_pool)
+
+    train_idx = list(range(n_train))
+    val_idx   = list(range(n_train + overlap_gap, n_train + overlap_gap + n_val))
+    test_idx  = list(range(n_train + overlap_gap + n_val + overlap_gap, n_total))
+
+    train_ds = Subset(dataset, train_idx)
+    val_ds   = Subset(dataset, val_idx)
+    test_ds  = Subset(dataset, test_idx)
+    print(f"Split — Train: {len(train_ds)}  Val: {len(val_ds)}  Test: {len(test_ds)}")
 
     _save_splits(
         save_dir,
-        train_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in train_ds.indices],
-        val_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in val_ds.indices],
-        test_ids=[int(dataset.df.iloc[i]["sample_id"]) for i in test_ds.indices],
+        train_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in train_idx],
+        val_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in val_idx],
+        test_ids=[f"{int(dataset.df.iloc[i]['sample_id']):06d}" for i in test_idx],
     )
 
     batch = cfg.get("batch_size", 4)
@@ -296,6 +405,7 @@ def train_weight(cfg):
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=cfg["lr"])
 
+    history = {"train_loss": [], "val_loss": []}
     for epoch in range(cfg["epochs"]):
         model.train()
         running = 0.0
@@ -314,6 +424,8 @@ def train_weight(cfg):
                 x, y = x.to(device), y.to(device)
                 val_loss += criterion(model(x), y).item() * x.size(0)
 
+        history["train_loss"].append(running / len(train_ds))
+        history["val_loss"].append(val_loss / len(val_ds))
         if (epoch + 1) % 10 == 0 or epoch == cfg["epochs"] - 1:
             print(f"Epoch {epoch+1}/{cfg['epochs']} | "
                   f"Train: {running/len(train_ds):.4f} | Val: {val_loss/len(val_ds):.4f}")
@@ -321,6 +433,12 @@ def train_weight(cfg):
     os.makedirs(save_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
+
+    losses_path = os.path.join(save_dir, "losses.json")
+    with open(losses_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"Losses saved → {losses_path}")
+    _save_loss_plot(history, save_dir)
 
     _eval_weight(model, device, test_loader)
 

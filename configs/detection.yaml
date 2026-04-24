@@ -1,6 +1,8 @@
 data_dir: data
 labels_csv: corrected_labels.csv
 
+overlap_gap: 4
+
 batch_size: 8
 lr: 1.0e-4
 epochs: 70

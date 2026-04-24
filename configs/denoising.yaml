@@ -4,16 +4,27 @@ labels_csv: labels.csv
 # Physical sensor parameters — update these to match your DAS hardware.
 # dx and dt are used by fk_filter. Set dt: null to default to 1/fs.
 fs: 2000
-dx: 1.0
+dx: 1.0209523439407349
 dt: null
 
 # Train/val/test split
-# n_train samples are taken first; the remainder is split evenly between val and test.
-n_train: 40
+# split_mode: random  → randomly assign samples (safe when stride >= window, overlap_gap=0)
+# split_mode: temporal → first n_train samples go to train, then gap, then val, then test
+# overlap_gap: only needed for temporal mode with overlapping windows (stride < window)
+# Use exactly one of train_frac or n_train (train_frac takes priority if both present)
+train_frac: 0.7
+# n_train: 40
+overlap_gap: 0
+split_mode: temporal
+split_seed: 42
 
-batch_size: 2
-lr: 6.0e-6
-epochs: 150
+batch_size: 4
+lr: 1.0e-4
+epochs: 400
+log_interval: 10
+lr_patience: 20
+include_background: false
+correlation_weight: 1.0
 
 save_dir: results/denoising
 
@@ -32,3 +43,7 @@ steps:
     vmin: 10.0
     vmax: 60.0
     taper: 0.05
+#  - name: curvelet
+#    n_scales: 4
+#    n_angles: 16
+#    thresh: 3.5

@@ -18,7 +18,7 @@ class DASSampleDataset(Dataset):
         X = raw np.load(data_path)
         Y = preprocess(X, fs, dx=..., dt=...)   # dt optional; defaults to 1/fs
     """
-    def __init__(self, df, preprocess, fs_das, *, dx=None, root_dir="."):
+    def __init__(self, df, preprocess, fs_das, *, dx=None, root_dir=".", augment=False):
         """
         df        : pandas DataFrame subset of labels.csv (already filtered)
         preprocess: callable preprocess(x, fs, **ctx) from make_preprocess(...)
@@ -31,6 +31,7 @@ class DASSampleDataset(Dataset):
         self.fs_das = float(fs_das)
         self.dx = dx
         self.root_dir = root_dir
+        self.augment = augment
 
     def __len__(self):
         return len(self.df)
@@ -44,15 +45,34 @@ class DASSampleDataset(Dataset):
 
         raw = np.load(path).astype(np.float32)  # (n_channels, n_time)
 
-        # processed target
+        # Normalize using raw's own stats. Apply the same shift/scale to clean so
+        # the model learns in O(1) space and the relative raw→clean relationship is preserved.
+        mean = raw.mean()
+        std = raw.std() + 1e-8
+
         if self.dx is None:
             clean = self.preprocess(raw, self.fs_das).astype(np.float32)
         else:
             clean = self.preprocess(raw, self.fs_das, dx=self.dx).astype(np.float32)
 
-        # add channel dim for NN: (1, H, W)
-        raw_t = torch.from_numpy(raw[None, ...])
-        clean_t = torch.from_numpy(clean[None, ...])
+        if self.augment:
+            # Channel flip (p=0.5): reverse spatial order on both arrays.
+            # Physically valid — DAS measurement is symmetric along the fiber.
+            if np.random.random() < 0.5:
+                raw   = raw[::-1, :].copy()
+                clean = clean[::-1, :].copy()
+            # Time reversal (p=0.5): reverse temporal order on both arrays.
+            # Physically valid — bandpass/fk_filter are applied before this flip,
+            # and raw→clean relationship is preserved under time reversal.
+            if np.random.random() < 0.5:
+                raw   = raw[:, ::-1].copy()
+                clean = clean[:, ::-1].copy()
+
+        raw_norm   = (raw   - mean) / std
+        clean_norm = (clean - mean) / std
+
+        raw_t   = torch.from_numpy(raw_norm[None, ...])
+        clean_t = torch.from_numpy(clean_norm[None, ...])
 
         return raw_t, clean_t
 
