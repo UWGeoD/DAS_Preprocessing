@@ -15,6 +15,8 @@ import argparse
 import glob
 import json
 import os
+import warnings
+warnings.filterwarnings("ignore", message="Pandas requires version", category=UserWarning)
 from pathlib import Path
 from typing import Optional
 
@@ -99,6 +101,8 @@ def prepare_das_windows_and_labels(
     end_frame_col: str = "frame_end_bridge",
     multi_token: str = "mixed",
     none_token: Optional[str] = None,
+    shuffle_samples: bool = False,
+    random_seed: int = 42,
 ) -> tuple:
     """
     Slide a window over das_array, save each window as .npy, and write labels.csv.
@@ -139,6 +143,10 @@ def prepare_das_windows_and_labels(
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
+    # Remove any leftover temp files from an interrupted previous run
+    for f in out_path.glob("_tmp_*.npy"):
+        f.unlink()
+
     events_np = df_lbl[["start_s", "end_s"]].to_numpy()
     veh_frames = df_lbl[start_frame_col].to_numpy(dtype=float)
 
@@ -147,7 +155,7 @@ def prepare_das_windows_and_labels(
     sys_ref = _hms_to_seconds(sys_time_ref_hms)
 
     rows = []
-    sample_id = 0
+    tmp_id = 0
     start_idx = i_min
 
     while start_idx <= i_max - win_len:
@@ -186,12 +194,11 @@ def prepare_das_windows_and_labels(
             if clipped_s < clipped_e:
                 signal_rects.append([clipped_s, clipped_e])
 
-        fname = f"sample_{sample_id:06d}.npy"
-        np.save(out_path / fname, x.astype(np.float32))
+        # Save with a temp name; final name assigned after optional shuffle
+        np.save(out_path / f"_tmp_{tmp_id:06d}.npy", x.astype(np.float32))
 
         rows.append({
-            "sample_id": f"{sample_id:06d}",
-            "data_path": str((out_path / fname).as_posix()),
+            "_tmp_id": tmp_id,
             "count": cnt,
             "start_frame": win_start_frame,
             "end_frame": win_end_frame,
@@ -199,10 +206,33 @@ def prepare_das_windows_and_labels(
             "signal_rects": json.dumps(signal_rects),
         })
 
-        sample_id += 1
+        tmp_id += 1
         start_idx += stride
 
-    df_out = pd.DataFrame(rows)
+    # Determine final sample ordering
+    if shuffle_samples:
+        if stride_s < window_length_s:
+            overlap_pct = (1.0 - stride_s / window_length_s) * 100
+            print(
+                f"\nWARNING: stride_s ({stride_s}s) < window_length_s ({window_length_s}s). "
+                f"Adjacent samples share {overlap_pct:.0f}% of their raw data. "
+                f"Random shuffle with overlapping windows INVALIDATES overlap_gap in "
+                f"train.py, causing data contamination between splits. "
+                f"Set shuffle_samples: false or use stride_s >= window_length_s.\n"
+            )
+        order = np.random.default_rng(random_seed).permutation(len(rows))
+        print(f"Sample order: shuffled (seed={random_seed})")
+    else:
+        order = np.arange(len(rows))
+        print("Sample order: temporal (sequential)")
+
+    # Rename _tmp_XXXXXX.npy → sample_XXXXXX.npy in final order
+    for new_id, old_id in enumerate(order):
+        (out_path / f"_tmp_{old_id:06d}.npy").rename(out_path / f"sample_{new_id:06d}.npy")
+        rows[old_id]["sample_id"] = f"{new_id:06d}"
+        rows[old_id]["data_path"] = str((out_path / f"sample_{new_id:06d}.npy").as_posix())
+
+    df_out = pd.DataFrame([rows[i] for i in order]).drop(columns=["_tmp_id"])
     csv_path = out_path / csv_out
     df_out.to_csv(csv_path, index=False)
     print(f"Saved {len(df_out)} samples → {out_path.resolve()}")
@@ -249,6 +279,14 @@ def main():
         out_col="frame_end_bridge",
     )
 
+    # Clear stale samples from a previous run
+    out_dir_path = Path(cfg["out_dir"])
+    stale = sorted(out_dir_path.glob("sample_*.npy"))
+    if stale:
+        for f in stale:
+            f.unlink()
+        print(f"Cleared {len(stale)} stale sample(s) from {out_dir_path}")
+
     prepare_das_windows_and_labels(
         das_array=das_array,
         labels_csv_or_df=vehicle_label_adjusted,
@@ -265,6 +303,8 @@ def main():
         end_frame_col="frame_end_bridge",
         multi_token=cfg["multi_token"],
         none_token=cfg["none_token"],
+        shuffle_samples=cfg.get("shuffle_samples", False),
+        random_seed=cfg.get("random_seed", 42),
     )
 
 

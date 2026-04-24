@@ -16,7 +16,15 @@ bridge_length_m: 35
 
 # Windowing
 window_length_s: 5.0
-stride_s: 1.0
+stride_s: 5.0
+
+# Sample ordering
+# shuffle_samples: false → samples numbered in temporal order (default, safe always)
+# shuffle_samples: true  → samples numbered in random order (random_seed controls it)
+#   WARNING: only safe when stride_s >= window_length_s (non-overlapping windows).
+#   With overlapping windows, shuffle invalidates overlap_gap in train.py.
+shuffle_samples: false
+random_seed: 42
 
 # Output paths (relative to project root)
 out_dir: data/raw
