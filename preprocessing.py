@@ -315,7 +315,7 @@ def curvelet_like_denoise(
     for s in range(n_scales):
         lo, hi = float(r_edges[s]), float(r_edges[s + 1])
         Rmask = radial_mask(R, lo, hi)
-        is_lowpass = (s == n_scales - 1)
+        is_lowpass = (s == 0)
 
         for ac in ang_centers:
             Amask = angular_mask(TH, float(ac), wedge_width)
