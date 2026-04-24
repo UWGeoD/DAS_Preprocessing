@@ -5,6 +5,9 @@ Usage:
     python predict.py --task weight    --input sample.npy       # predict vehicle weight
 """
 
+import warnings
+warnings.filterwarnings("ignore", message="Pandas requires version", category=UserWarning)
+
 import argparse
 import glob
 import os
@@ -14,7 +17,7 @@ import torch
 
 from dataset import IDX_TO_TYPE
 from models.detection_transformer import DASCountTransformer
-from models.unet import UNet
+from models.unet_v2 import UNetV2
 from models.weight_cnn import DASWeightCNN
 from train import load_config
 
@@ -35,7 +38,7 @@ def predict_denoising(cfg):
     save_dir = cfg.get("save_dir", "results/denoising")
     data_dir = cfg["data_dir"]
 
-    model = UNet(in_channels=1, out_channels=1).to(device)
+    model = UNetV2(in_channels=1, out_channels=1).to(device)
     model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device))
     model.eval()
 
@@ -43,13 +46,22 @@ def predict_denoising(cfg):
     out_dir = os.path.join(data_dir, "denoised")
     os.makedirs(out_dir, exist_ok=True)
 
+    stale = glob.glob(os.path.join(out_dir, "denoised_*.npy"))
+    if stale:
+        for f in stale:
+            os.remove(f)
+        print(f"Cleared {len(stale)} stale denoised file(s) from {out_dir}/")
+
     files = sorted(glob.glob(os.path.join(in_dir, "sample_*.npy")))
     print(f"Denoising {len(files)} files → {out_dir}/")
     with torch.no_grad():
         for fpath in files:
             raw = np.load(fpath).astype(np.float32)
-            t = torch.from_numpy(raw).unsqueeze(0).unsqueeze(0).to(device)
-            pred = model(t).squeeze().cpu().numpy()
+            mean, std = raw.mean(), raw.std() + 1e-8
+            raw_norm = (raw - mean) / std
+            t = torch.from_numpy(raw_norm).unsqueeze(0).unsqueeze(0).to(device)
+            pred_norm = model(t).squeeze().cpu().numpy()
+            pred = pred_norm * std + mean  # restore original signal units
             np.save(os.path.join(out_dir, f"denoised_{os.path.basename(fpath)}"), pred)
     print("Done.")
 
