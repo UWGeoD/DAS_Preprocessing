@@ -63,6 +63,9 @@ class UNet(nn.Module):
         # Final output
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
+        # Dropout applied after bottleneck and first two decoder blocks
+        self.drop = nn.Dropout2d(p=0.3)
+
     def forward(self, x):
         # ----- Encoder -----
         x1 = self.down1(x)
@@ -70,7 +73,7 @@ class UNet(nn.Module):
         x3 = self.down3(self.pool2(x2))
         
         # Bottleneck
-        x4 = self.bottleneck(self.pool3(x3))
+        x4 = self.drop(self.bottleneck(self.pool3(x3)))
 
         # ----- Decoder -----
         # Level 3
@@ -78,21 +81,18 @@ class UNet(nn.Module):
         # Handle padding/odd shapes: resize up_x to match x3 exactly
         if up_x.shape != x3.shape:
              up_x = F.interpolate(up_x, size=x3.shape[2:], mode="bilinear", align_corners=True)
-        x = torch.cat([x3, up_x], dim=1)
-        x = self.dec3(x)
+        x = self.drop(self.dec3(torch.cat([x3, up_x], dim=1)))
 
         # Level 2
         up_x = self.up2(x)
         if up_x.shape != x2.shape:
              up_x = F.interpolate(up_x, size=x2.shape[2:], mode="bilinear", align_corners=True)
-        x = torch.cat([x2, up_x], dim=1)
-        x = self.dec2(x)
+        x = self.drop(self.dec2(torch.cat([x2, up_x], dim=1)))
 
         # Level 1
         up_x = self.up1(x)
         if up_x.shape != x1.shape:
              up_x = F.interpolate(up_x, size=x1.shape[2:], mode="bilinear", align_corners=True)
-        x = torch.cat([x1, up_x], dim=1)
-        x = self.dec1(x)
+        x = self.dec1(torch.cat([x1, up_x], dim=1))
 
         return self.final_conv(x)
