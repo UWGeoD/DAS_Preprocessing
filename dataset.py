@@ -45,11 +45,6 @@ class DASSampleDataset(Dataset):
 
         raw = np.load(path).astype(np.float32)  # (n_channels, n_time)
 
-        # Normalize using raw's own stats. Apply the same shift/scale to clean so
-        # the model learns in O(1) space and the relative raw→clean relationship is preserved.
-        mean = raw.mean()
-        std = raw.std() + 1e-8
-
         if self.dx is None:
             clean = self.preprocess(raw, self.fs_das).astype(np.float32)
         else:
@@ -68,8 +63,14 @@ class DASSampleDataset(Dataset):
                 raw   = raw[:, ::-1].copy()
                 clean = clean[:, ::-1].copy()
 
-        raw_norm   = (raw   - mean) / std
-        clean_norm = (clean - mean) / std
+        # Per-channel mean removal: each channel has its own DC offset (absolute fiber strain
+        # level), so we center each channel independently. std is then computed on the
+        # centered signal and reflects only the within-channel noise amplitude — not the
+        # inter-channel DC spread, which would inflate std and make clean_norm near-zero.
+        chan_mean = raw.mean(axis=1, keepdims=True)  # (n_channels, 1)
+        std       = (raw - chan_mean).std() + 1e-8
+        raw_norm   = (raw - chan_mean) / std
+        clean_norm = clean / std
 
         raw_t   = torch.from_numpy(raw_norm[None, ...])
         clean_t = torch.from_numpy(clean_norm[None, ...])
