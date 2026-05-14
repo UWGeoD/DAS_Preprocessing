@@ -1,4 +1,4 @@
-data_dir: data
+# data_dir comes from the active dataset profile (configs/datasets/*.yaml)
 labels_csv: corrected_labels.csv
 
 overlap_gap: 4

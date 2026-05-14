@@ -1,0 +1,48 @@
+# Dataset: Newville Bridge — November 2025 recording
+# label_mode: actual_end
+#   frame_end column contains the actual video frame when the rear wheel
+#   passes the second bridge joint (labeled directly, not estimated).
+#   signal_rects = [frame_start, frame_end] (actual vehicle signal boundaries)
+label_mode: actual_end
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+recording_dir: /media/jesse/sdc/Newville_20251113/
+file_pattern: "*.h5"
+das_file: /media/jesse/sdc/Newville_20251113/New_bridge_2025-11-13T100454-0600.h5
+video_path: /media/jesse/sdc/Newville_20251113/DJI_20251112130016_0067_D.mp4
+labeling_csv: /media/jesse/sdc/Newville_20251113/Vehicle_Labelings_Newville_New_Bridge.csv
+
+# ── DAS hardware ─────────────────────────────────────────────────────────────
+# TODO: confirm these match the Nov 2025 sensor setup
+vendor: silixa
+fs_das: 5000
+dx: 1.0209523439407349
+dt: null
+channel_start: 35
+channel_end: 66
+
+# ── Video / time-alignment ───────────────────────────────────────────────────
+# TODO: fill in from the Nov 2025 recording metadata
+fps_video: 59.94005994005994
+frame_ref: 0
+sys_time_ref_hms: "10:03:35.631"
+das_start_hms: "10:02:54.488700"
+
+# ── Windowing ────────────────────────────────────────────────────────────────
+window_length_s: 5.0
+stride_s: 5.0
+
+# ── Sample ordering ──────────────────────────────────────────────────────────
+shuffle_samples: false
+random_seed: 42
+
+# ── Output paths (isolated per dataset) ─────────────────────────────────────
+out_dir: data/newville_nov2025/raw
+csv_out: ../labels.csv
+
+# ── Training/inference data root (used by train.py / predict.py) ─────────────
+data_dir: data/newville_nov2025
+
+# ── Label tokens ─────────────────────────────────────────────────────────────
+multi_token: mixed
+none_token: background

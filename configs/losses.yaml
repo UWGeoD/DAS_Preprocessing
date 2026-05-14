@@ -1,0 +1,21 @@
+# Loss function registry for denoising.
+# In denoising.yaml set  loss: <name>  to select.
+# All parameters for that loss are merged into the training config at load time.
+
+mse:
+  recon: mse
+  pred_reg_type: l1
+  pred_reg_weight: 0.0001
+
+l1:
+  recon: l1
+  pred_reg_type: l1
+  pred_reg_weight: 0.0001
+
+gan_nce:
+  lambda_NCE: 100       # weight for PatchNCE contrastive loss; GAN term is always weight 1
+  nce_tau: 0.07         # softmax temperature for NCE
+  nce_num_patches: 512  # spatial locations sampled per feature layer per batch
+  nce_layers: [0, 1, 2, 3, 4]  # encoder levels for NCE (0=enc1 finest/largest, 4=bottleneck)
+  d_depth: 5            # PatchGAN depth: bigger = larger temporal RF, fewer output scores
+                        # 1→~3ms, 2→~7ms, 3→~14ms (default); 4→~28ms, 5→~57ms (temporal-only extra layers)

@@ -1,0 +1,90 @@
+# sweep.yaml — Grid search configuration for run_sweep.py
+#
+# Non-grid parameters come from:
+#   configs/datasets/{dataset}.yaml  →  sensor params, paths, timing
+#   configs/denoising.yaml           →  training hyperparameters (lr, epochs, etc.)
+#
+# Each key here is one grid dimension. Add a new key + list to include it in the sweep.
+# Scalar keys (lr, epochs, batch_size) map directly to denoising.yaml config keys.
+#
+# Usage:
+#   python run_sweep.py                                     # uses defaults below
+#   python run_sweep.py --sweep configs/sweep.yaml --dataset newville_apr2025
+#   python run_sweep.py --mode reset                        # wipe DB before starting
+
+sweep_dir: results/sweep       # per-run artifact directory root
+sweep_data_root: data/sweep    # windowed .npy cache root (one sub-dir per window_length_s)
+
+# ── Grid dimensions ──────────────────────────────────────────────────────────
+
+sample_size: [80]
+window_length_s: [5.0]
+
+# Loss function variants. Each entry is a dict with 'name' (must match a key
+# in configs/losses.yaml) plus optional parameter overrides.
+# All parameters from losses.yaml (recon, pred_reg_type, pred_reg_weight, etc.)
+# can be specified here — they override the per-loss defaults.
+# gan_nce is architecturally supported but ~2× slower — uncomment to include.
+#
+# pred_reg_weight values below: 0 → 0.001 in 10 steps (linear), for both mse and l1.
+# pred_reg_type: l1  (default from losses.yaml — shown explicitly so it can be changed)
+loss:
+  # ── MSE reconstruction ──────────────────────────────────────────────────────
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0001}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0002}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0003}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0004}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0005}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0006}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0007}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.0009}
+  - {name: mse, pred_reg_type: l1, pred_reg_weight: 0.001}
+  # ── L1 reconstruction ───────────────────────────────────────────────────────
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0001}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0002}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0003}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0004}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0005}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0006}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0007}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.0009}
+  - {name: l1,  pred_reg_type: l1, pred_reg_weight: 0.001}
+  # ── GAN+NCE (uncomment to include — much slower) ────────────────────────────
+  # - {name: gan_nce, lambda_NCE: 1.0, nce_tau: 0.07}
+
+
+
+# Each entry is a complete preprocessing pipeline (list of step dicts).
+# Adding a new pipeline variant = adding a new list item here.
+steps:
+  # Pipeline 1: detrend 
+  #- - {name: detrend}
+
+  # Pipeline 2: detrend + bandpass
+  #- - {name: detrend}
+  #  - {name: bandpass, f_lo: 0.1, f_hi: 2.0, order: 2, zero_phase: true}
+
+  # Pipeline 2: detrend + bandpass (wider band)
+  #- - {name: detrend}
+  #  - {name: bandpass, f_lo: 0.1, f_hi: 10.0, order: 2, zero_phase: true}
+
+  # Pipeline 2: detrend + bandpass (wider band)
+  #- - {name: detrend}
+  #  - {name: bandpass, f_lo: 0.1, f_hi: 20.0, order: 2, zero_phase: true}
+
+  # Pipeline 3: detrend + bandpass (low band) + f-k filter
+  - - {name: detrend}
+    - {name: bandpass, f_lo: 0.1, f_hi: 2.0, order: 2, zero_phase: true}
+    - {name: fk_filter, vmin: 5.0, vmax: 100.0, taper: 0.05}
+
+  # Pipeline 3: detrend + bandpass (low band) + f-k filter
+  #- - {name: detrend}
+  #  - {name: bandpass, f_lo: 0.1, f_hi: 10.0, order: 2, zero_phase: true}
+  #  - {name: fk_filter, vmin: 5.0, vmax: 100.0, taper: 0.05}
+
+  # Pipeline 3: detrend + bandpass (low band) + f-k filter
+  #- - {name: detrend}
+  #  - {name: bandpass, f_lo: 0.1, f_hi: 20.0, order: 2, zero_phase: true}
+  #  - {name: fk_filter, vmin: 5.0, vmax: 100.0, taper: 0.05}
