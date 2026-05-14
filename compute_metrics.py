@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from config import DAS_FILE
+from config import load_dataset_config
 from DAS import DAS
 from preprocessing import make_preprocess
 from Utilities import compute_snr
@@ -169,10 +169,14 @@ def _save_snr_plots(df, splits_path, plot_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute per-sample SNR metrics.")
+    parser.add_argument(
+        "--dataset", default=None,
+        help="Dataset profile name or path (default: ACTIVE_DATASET in config.py)",
+    )
     parser.add_argument("--denoising-config", default="configs/denoising.yaml")
-    parser.add_argument("--data-prep-config", default="configs/data_prep.yaml")
-    parser.add_argument("--denoised-dir", default="data/denoised",
-                        help="Directory containing denoised_sample_XXXXXX.npy files")
+    parser.add_argument("--denoised-dir", default=None,
+                        help="Directory containing denoised_sample_XXXXXX.npy files "
+                             "(default: <data_dir>/denoised)")
     parser.add_argument("--out", default="results/metrics.csv")
     parser.add_argument("--splits", default="results/denoising/splits.json",
                         help="Path to splits.json for per-split breakdown")
@@ -180,21 +184,21 @@ def main():
                         help="Directory to save SNR plots and stats")
     args = parser.parse_args()
 
+    ds_cfg = load_dataset_config(args.dataset)
     with open(args.denoising_config) as f:
         den_cfg = yaml.safe_load(f)
-    with open(args.data_prep_config) as f:
-        dp_cfg = yaml.safe_load(f)
 
-    _meta = DAS(DAS_FILE).meta
-    dx = den_cfg.get("dx") or _meta["dx"]
-    dt = den_cfg.get("dt") or _meta["dt"]
+    _meta = DAS(ds_cfg["das_file"]).meta
+    dx = ds_cfg.get("dx") or _meta.get("dx")
+    dt = ds_cfg.get("dt") or _meta.get("dt")
 
     steps = [(s["name"], {k: v for k, v in s.items() if k != "name"}) for s in den_cfg["steps"]]
     pp = make_preprocess(steps=steps, dx=dx, dt=dt)
-    fs_das = den_cfg["fs"]
-    fps_video = dp_cfg["fps_video"]
+    fs_das = ds_cfg["fs_das"]
+    fps_video = ds_cfg["fps_video"]
 
-    data_dir = den_cfg.get("data_dir", "data")
+    data_dir = ds_cfg["data_dir"]
+    denoised_dir = args.denoised_dir or os.path.join(data_dir, "denoised")
     df = pd.read_csv(os.path.join(data_dir, den_cfg["labels_csv"]))
     df_signal = df[df["count"] > 0].reset_index(drop=True)
 
@@ -207,7 +211,7 @@ def main():
             continue
 
         denoised_fname = f"denoised_sample_{int(row['sample_id']):06d}.npy"
-        denoised_path = os.path.join(args.denoised_dir, denoised_fname)
+        denoised_path = os.path.join(denoised_dir, denoised_fname)
         if not os.path.exists(denoised_path):
             print(f"  missing denoised file: {denoised_path} — skipping sample {row['sample_id']}")
             skipped += 1
