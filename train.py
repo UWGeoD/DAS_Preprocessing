@@ -18,21 +18,47 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 from torch.utils.data import DataLoader, Subset
 
 from dataset import DASSampleDataset, DASCountDataset, DASWeightDataset, IDX_TO_TYPE
 from models.detection_transformer import DASCountTransformer
+from models.unet import UNet
 from models.unet_v2 import UNetV2
 from models.weight_cnn import DASWeightCNN
 from preprocessing import make_preprocess
 
 
-def load_config(task, config_path=None):
+def load_config(task, config_path=None, dataset=None):
+    """Load task YAML, then overlay dataset config values for sensor/data params.
+
+    Dataset config is authoritative for: data_dir, dx, dt, fs (sensor/data-specific).
+    Task YAML wins for everything else (model hyperparams, preprocessing steps, labels_csv).
+    """
+    from config import load_dataset_config
     path = config_path or f"configs/{task}.yaml"
     with open(path) as f:
-        return yaml.safe_load(f)
+        task_cfg = yaml.safe_load(f)
+
+    # Merge loss-specific defaults from losses.yaml (task_cfg wins on conflict)
+    losses_path = "configs/losses.yaml"
+    if task == "denoising" and os.path.exists(losses_path):
+        with open(losses_path) as f:
+            losses_cfg = yaml.safe_load(f)
+        loss_name = task_cfg.get("loss", "mse")
+        if loss_name in losses_cfg:
+            task_cfg = {**losses_cfg[loss_name], **task_cfg}
+
+    ds_cfg = load_dataset_config(dataset)
+    task_cfg["data_dir"] = ds_cfg["data_dir"]
+    # fs_das in dataset config → fs key used by training code
+    task_cfg["fs"] = ds_cfg["fs_das"]
+    for key in ("dx", "dt"):
+        if key in ds_cfg:
+            task_cfg[key] = ds_cfg[key]
+    return task_cfg
 
 
 def apply_overrides(cfg, args):
@@ -58,14 +84,53 @@ def _save_loss_plot(history, save_dir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     epochs = range(1, len(history["train_loss"]) + 1)
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(epochs, history["train_loss"], label="Train")
-    ax.plot(epochs, history["val_loss"],   label="Val")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+
+    def _plot(ax, keys_labels, title, hline=None):
+        for key, label, color in keys_labels:
+            if key in history:
+                ax.plot(epochs, history[key], label=label, color=color)
+        if hline is not None:
+            ax.axhline(hline, ls="--", color="gray", alpha=0.5, label=f"equilibrium {hline}")
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    if "train_gan" in history and "train_recon" in history:
+        # adv_nce style: recon is part of the loss
+        fig, axes = plt.subplots(1, 5, figsize=(22, 4))
+        _plot(axes[0], [("train_recon","Train Recon","tab:blue"),
+                        ("val_loss",  "Val Recon",  "tab:orange")], "Reconstruction")
+        _plot(axes[1], [("train_gan", "GAN (G)", "tab:red")],
+              "GAN Loss (G)", hline=0.25)
+        _plot(axes[2], [("train_nce", "NCE", "tab:purple")], "NCE Loss")
+        _plot(axes[3], [("train_d",   "D Loss", "tab:green")],
+              "Discriminator Loss", hline=0.25)
+        _plot(axes[4], [("train_loss","L_G Total","tab:blue"),
+                        ("val_loss", "Val Recon", "tab:orange")], "Total L_G vs Val")
+    elif "train_gan" in history:
+        # gan_nce style: no recon in loss — val is the reconstruction monitor
+        fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+        _plot(axes[0], [("train_gan", "GAN (G)", "tab:red")],
+              "GAN Loss (G)", hline=0.25)
+        _plot(axes[1], [("train_nce", "NCE", "tab:purple")], "NCE Loss")
+        _plot(axes[2], [("train_d",   "D Loss", "tab:green")],
+              "Discriminator Loss", hline=0.25)
+        _plot(axes[3], [("val_loss",  "Val Recon", "tab:orange")], "Val Recon (monitor)")
+    elif "train_reg" in history:
+        fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+        _plot(axes[0], [("train_loss", "Train Total", "tab:blue"),
+                        ("val_loss",   "Val",         "tab:orange")], "Total Loss")
+        _plot(axes[1], [("train_recon","Train Recon", "tab:blue"),
+                        ("val_loss",   "Val",         "tab:orange")], "Reconstruction")
+        _plot(axes[2], [("train_reg",  "Reg",         "tab:red")],   "Pred Regularization")
+    else:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        _plot(ax, [("train_loss","Train","tab:blue"),
+                   ("val_loss",  "Val",  "tab:orange")], "Loss")
+
     fig.tight_layout()
     out = os.path.join(save_dir, "losses.png")
     fig.savefig(out, dpi=100)
@@ -73,21 +138,259 @@ def _save_loss_plot(history, save_dir):
     print(f"Loss plot → {out}")
 
 
-def _correlation_loss(pred, target, eps=1e-8):
-    """1 − Pearson correlation, averaged over the batch.
-    A constant prediction gives correlation=0 → loss=1, so the model
-    cannot minimise this by predicting the target mean everywhere."""
-    p = pred.view(pred.size(0), -1)
-    t = target.view(target.size(0), -1)
-    p = p - p.mean(dim=1, keepdim=True)
-    t = t - t.mean(dim=1, keepdim=True)
-    corr = (p * t).sum(dim=1) / (p.norm(dim=1) * t.norm(dim=1) + eps)
-    return 1.0 - corr.mean()
+def _pred_reg_loss(pred, reg_type="l1"):
+    """Penalizes non-zero output to suppress background noise in the prediction.
+    l1: sparse prior — threshold-like, preserves high-amplitude signal.
+    l2: quadratic — over-penalizes signal peaks, use with very small weights only."""
+    if reg_type == "l2":
+        return pred.pow(2).mean()
+    return pred.abs().mean()
 
 
 # ---------------------------------------------------------------------------
 # Denoising
 # ---------------------------------------------------------------------------
+
+def train_denoising_core(df_pos, cfg, save_dir, device=None, df_bg=None):
+    """
+    Core denoising training loop.
+
+    Parameters
+    ----------
+    df_pos   : DataFrame of positive-count samples, already filtered and sliced.
+    cfg      : config dict with training hyperparameters, 'steps', 'fs', 'dx', 'dt'.
+    save_dir : directory to write splits.json (caller is responsible for saving best_model.pt).
+    device   : torch.device; defaults to CUDA if available.
+    df_bg    : optional background-only DataFrame appended to the train split only.
+
+    Returns
+    -------
+    model      : UNetV2 (or UNet) with best-val weights loaded.
+    history    : {"train_loss": [...], "val_loss": [...]}.
+    train_ids  : list of sample_id values in the training split.
+    val_ids    : list of sample_id values in the validation split.
+    test_ids   : list of sample_id values in the test split.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    split_mode  = cfg.get("split_mode", "temporal")
+    overlap_gap = cfg.get("overlap_gap", 0)
+    n_total     = len(df_pos)
+
+    if "train_frac" in cfg:
+        n_train = min(int(n_total * cfg["train_frac"]), n_total)
+    else:
+        n_train = min(cfg.get("n_train", 40), n_total)
+
+    if split_mode == "random":
+        rng       = np.random.default_rng(cfg.get("split_seed", 42))
+        idx       = rng.permutation(n_total)
+        train_idx = sorted(idx[:n_train].tolist())
+        remaining = idx[n_train:]
+        n_val     = len(remaining) // 2
+        val_idx   = sorted(remaining[:n_val].tolist())
+        test_idx  = sorted(remaining[n_val:].tolist())
+        train_df  = df_pos.iloc[train_idx].copy()
+        val_df    = df_pos.iloc[val_idx]
+        test_df   = df_pos.iloc[test_idx]
+        print(f"Split mode: random (seed={cfg.get('split_seed', 42)})")
+    else:
+        n_pool   = n_total - n_train - 2 * overlap_gap
+        n_val    = max(0, n_pool // 2)
+        train_df = df_pos.iloc[:n_train].copy()
+        val_df   = df_pos.iloc[n_train + overlap_gap : n_train + overlap_gap + n_val]
+        test_df  = df_pos.iloc[n_train + overlap_gap + n_val + overlap_gap :]
+        print(f"Split mode: temporal (overlap_gap={overlap_gap})")
+
+    if len(val_df) < 5:
+        print(f"  WARNING: val set has only {len(val_df)} samples — early stopping may be unreliable")
+
+    if df_bg is not None and len(df_bg):
+        train_df = pd.concat([train_df, df_bg], ignore_index=True)
+        print(f"  + {len(df_bg)} background samples → training total: {len(train_df)}")
+
+    print(f"Split — Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
+
+    train_ids = train_df["sample_id"].tolist()
+    val_ids   = val_df["sample_id"].tolist()
+    test_ids  = test_df["sample_id"].tolist()
+    _save_splits(save_dir, train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
+
+    steps = [(s["name"], {k: v for k, v in s.items() if k != "name"})
+             for s in cfg["steps"]]
+    pp = make_preprocess(steps=steps, dx=cfg.get("dx"), dt=cfg.get("dt"))
+
+    fs           = cfg["fs"]
+    batch        = cfg.get("batch_size", 8)
+    train_ds     = DASSampleDataset(train_df, preprocess=pp, fs_das=fs, augment=True)
+    val_ds       = DASSampleDataset(val_df,   preprocess=pp, fs_das=fs, augment=False)
+    train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False)
+
+    model_name = cfg.get("model", "unet_v2")
+    if model_name == "unet":
+        model = UNet(in_channels=1, out_channels=1).to(device)
+    else:
+        model = UNetV2(in_channels=1, out_channels=1).to(device)
+    print(f"Model: {model_name}  |  Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    loss_name     = cfg.get("loss", "mse")
+    recon_type    = cfg.get("recon", "mse")   # "mse" or "l1"; default mse for val monitoring
+    criterion     = nn.MSELoss() if recon_type == "mse" else nn.L1Loss()
+    pred_reg_w    = cfg.get("pred_reg_weight", 0.0)
+    pred_reg_type = cfg.get("pred_reg_type", "l1")
+    print(f"Loss: {loss_name}")
+
+    use_gan_nce = (loss_name == "gan_nce")
+    if use_gan_nce:
+        from models.discriminator import PatchGAN
+        from models.patchnce import PatchSampleF, PatchNCELoss as NCELoss
+        d_depth         = cfg.get("d_depth", 3)
+        discriminator   = PatchGAN(in_channels=1, n_layers=d_depth).to(device)
+        lambda_NCE      = cfg.get("lambda_NCE", 1.0)
+        nce_tau         = cfg.get("nce_tau", 0.07)
+        nce_num_patches = cfg.get("nce_num_patches", 256)
+        nce_layers      = cfg.get("nce_layers", list(range(len(model.feat_channels))))
+        feat_ch_nce     = [model.feat_channels[i] for i in nce_layers]
+        patch_sampler   = PatchSampleF(feat_ch_nce, embed_dim=256).to(device)
+        nce_loss_fn     = NCELoss(tau=nce_tau).to(device)
+        optimizer_G = optim.Adam(
+            list(model.parameters()) + list(patch_sampler.parameters()),
+            lr=cfg["lr"], weight_decay=1e-4,
+        )
+        optimizer_D = optim.Adam(discriminator.parameters(), lr=cfg["lr"], betas=(0.5, 0.999))
+    else:
+        optimizer_G = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer_G, mode="min", patience=cfg.get("lr_patience", 20), factor=0.5, min_lr=1e-6,
+    )
+
+    best_val, best_state = float("inf"), None
+    log_interval         = cfg.get("log_interval", 10)
+    if use_gan_nce:
+        history = {"train_loss": [], "val_loss": [], "train_gan": [], "train_nce": [], "train_d": []}
+    else:
+        history = {"train_loss": [], "val_loss": [], "train_recon": [], "train_reg": []}
+
+    for epoch in range(cfg["epochs"]):
+        model.train()
+        train_loss = 0.0
+        sum_recon  = 0.0
+        sum_reg    = 0.0
+
+        if use_gan_nce:
+            discriminator.train()
+            sum_gan = sum_nce = sum_d = 0.0
+
+        for raw_b, clean_b in train_loader:
+            raw_b, clean_b = raw_b.to(device), clean_b.to(device)
+
+            if use_gan_nce:
+                # ── D update ──────────────────────────────────────────────────
+                discriminator.requires_grad_(True)
+                optimizer_D.zero_grad()
+                with torch.no_grad():
+                    fake = model(raw_b)
+                d_real  = discriminator(clean_b)
+                d_fake  = discriminator(fake)
+                loss_D  = 0.5 * (F.mse_loss(d_real, torch.ones_like(d_real))
+                                 + F.mse_loss(d_fake, torch.zeros_like(d_fake)))
+                loss_D.backward()
+                optimizer_D.step()
+
+                # ── G update: L_G = L_GAN + λ_NCE · L_NCE ────────────────────
+                discriminator.requires_grad_(False)
+                optimizer_G.zero_grad()
+
+                pred, feats_raw  = model(raw_b, return_features=True)
+                feats_raw        = [f.detach() for f in feats_raw]
+
+                d_fake_g  = discriminator(pred)
+                loss_GAN  = F.mse_loss(d_fake_g, torch.ones_like(d_fake_g))
+
+                _, feats_pred    = model(pred, return_features=True)
+                feats_pred_nce   = [feats_pred[i] for i in nce_layers]
+                feats_raw_nce    = [feats_raw[i]  for i in nce_layers]
+                proj_q, ids      = patch_sampler(feats_pred_nce, nce_num_patches)
+                proj_k, _        = patch_sampler(feats_raw_nce,  nce_num_patches, patch_ids=ids)
+                loss_NCE = sum(nce_loss_fn(q, k) for q, k in zip(proj_q, proj_k)) / len(proj_q)
+
+                loss_G = loss_GAN + lambda_NCE * loss_NCE
+                loss_G.backward()
+                optimizer_G.step()
+
+                n = raw_b.size(0)
+                sum_gan    += loss_GAN.item()   * n
+                sum_nce    += loss_NCE.item()   * n
+                sum_d      += loss_D.item()     * n
+                train_loss += loss_G.item()     * n
+            else:
+                optimizer_G.zero_grad()
+                pred    = model(raw_b)
+                recon_l = criterion(pred, clean_b)
+                loss    = recon_l + pred_reg_w * _pred_reg_loss(pred, pred_reg_type)
+                loss.backward()
+                optimizer_G.step()
+                n = raw_b.size(0)
+                sum_recon  += recon_l.item() * n
+                sum_reg    += (loss.item() - recon_l.item()) * n
+                train_loss += loss.item() * n
+
+        train_loss /= len(train_ds)
+
+        model.eval()
+        if use_gan_nce:
+            discriminator.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for raw_b, clean_b in val_loader:
+                raw_b, clean_b = raw_b.to(device), clean_b.to(device)
+                pred     = model(raw_b)
+                recon    = criterion(pred, clean_b)
+                if pred_reg_w > 0:
+                    recon = recon + pred_reg_w * _pred_reg_loss(pred, pred_reg_type)
+                val_loss += recon.item() * raw_b.size(0)
+        val_loss /= len(val_ds)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        n = len(train_ds)
+        if use_gan_nce:
+            history["train_gan"].append(sum_gan / n)
+            history["train_nce"].append(sum_nce / n)
+            history["train_d"].append(sum_d / n)
+        else:
+            history["train_recon"].append(sum_recon / n)
+            history["train_reg"].append(sum_reg / n)
+        scheduler.step(val_loss)
+
+        if val_loss < best_val:
+            best_val   = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+
+        if (epoch + 1) % log_interval == 0 or epoch == cfg["epochs"] - 1:
+            lr_now = optimizer_G.param_groups[0]["lr"]
+            if use_gan_nce:
+                n = len(train_ds)
+                print(f"Epoch {epoch+1}/{cfg['epochs']} | "
+                      f"GAN: {sum_gan/n:.4f} | NCE: {sum_nce/n:.4f} | "
+                      f"D: {sum_d/n:.4f} | Val: {val_loss:.6f} | LR: {lr_now:.2e}")
+            else:
+                print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {lr_now:.2e}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"Best val loss: {best_val:.6f}")
+
+    if use_gan_nce:
+        torch.save(discriminator.state_dict(), os.path.join(save_dir, "discriminator.pt"))
+        torch.save(patch_sampler.state_dict(), os.path.join(save_dir, "patch_sampler.pt"))
+        print(f"Saved → {save_dir}/discriminator.pt, patch_sampler.pt")
+
+    return model, history, train_ids, val_ids, test_ids
+
 
 def train_denoising(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,121 +398,21 @@ def train_denoising(cfg):
 
     save_dir = cfg.get("save_dir", "results/denoising")
     data_dir = cfg["data_dir"]
-    df = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
-    df_pos = df[df["count"] > 0].sort_values("sample_id").reset_index(drop=True)
+    df       = pd.read_csv(os.path.join(data_dir, cfg["labels_csv"]))
+    df_pos   = df[df["count"] > 0].sort_values("sample_id").reset_index(drop=True)
 
-    split_mode = cfg.get("split_mode", "temporal")
-    overlap_gap = cfg.get("overlap_gap", 0)
-    n_total = len(df_pos)
-    if "train_frac" in cfg:
-        n_train = min(int(n_total * cfg["train_frac"]), n_total)
-    else:
-        n_train = min(cfg.get("n_train", 40), n_total)
+    # Optional cap on total positive samples used (set by run_sweep.py; no-op if absent).
+    sample_size = cfg.get("sample_size")
+    if sample_size is not None:
+        df_pos = df_pos.iloc[:sample_size].copy()
 
-    if split_mode == "random":
-        rng = np.random.default_rng(cfg.get("split_seed", 42))
-        idx = rng.permutation(n_total)
-        train_idx = sorted(idx[:n_train].tolist())
-        remaining = idx[n_train:]
-        n_val = len(remaining) // 2
-        val_idx  = sorted(remaining[:n_val].tolist())
-        test_idx = sorted(remaining[n_val:].tolist())
-        train_df = df_pos.iloc[train_idx].copy()
-        val_df   = df_pos.iloc[val_idx]
-        test_df  = df_pos.iloc[test_idx]
-        print(f"Split mode: random (seed={cfg.get('split_seed', 42)})")
-    else:
-        n_pool = n_total - n_train - 2 * overlap_gap
-        n_val  = max(0, n_pool // 2)
-        train_df = df_pos.iloc[:n_train].copy()
-        val_df   = df_pos.iloc[n_train + overlap_gap : n_train + overlap_gap + n_val]
-        test_df  = df_pos.iloc[n_train + overlap_gap + n_val + overlap_gap :]
-        print(f"Split mode: temporal (overlap_gap={overlap_gap})")
-
-    # Optionally add background (count == 0) windows to training only.
+    df_bg = None
     if cfg.get("include_background", False):
         df_bg = df[df["count"] == 0].sort_values("sample_id").reset_index(drop=True)
-        train_df = pd.concat([train_df, df_bg], ignore_index=True)
-        print(f"  + {len(df_bg)} background samples → training total: {len(train_df)}")
-
-    print(f"Split — Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
-
-    _save_splits(
-        save_dir,
-        train_ids=train_df["sample_id"].tolist(),
-        val_ids=val_df["sample_id"].tolist(),
-        test_ids=test_df["sample_id"].tolist(),
-    )
-
-    steps = [(s["name"], {k: v for k, v in s.items() if k != "name"})
-             for s in cfg["steps"]]
-    pp = make_preprocess(steps=steps, dx=cfg.get("dx"), dt=cfg.get("dt"))
-
-    fs = cfg["fs"]
-    train_ds = DASSampleDataset(train_df, preprocess=pp, fs_das=fs, augment=True)
-    val_ds   = DASSampleDataset(val_df,   preprocess=pp, fs_das=fs, augment=False)
-
-    batch = cfg.get("batch_size", 8)
-    train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False)
-
-    model     = UNetV2(in_channels=1, out_channels=1).to(device)
-    criterion = nn.L1Loss()
-    optimizer = optim.Adam(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min",
-        patience=cfg.get("lr_patience", 20),
-        factor=0.5,
-        min_lr=1e-6,
-    )
-    corr_w = cfg.get("correlation_weight", 0.0)
-
-    best_val, best_state = float("inf"), None
-    log_interval = cfg.get("log_interval", 10)
-    history = {"train_loss": [], "val_loss": []}
-
-    for epoch in range(cfg["epochs"]):
-        model.train()
-        train_loss = 0.0
-        for raw_b, clean_b in train_loader:
-            raw_b, clean_b = raw_b.to(device), clean_b.to(device)
-            optimizer.zero_grad()
-            pred = model(raw_b)
-            loss = criterion(pred, clean_b) + corr_w * _correlation_loss(pred, clean_b)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * raw_b.size(0)
-        train_loss /= len(train_ds)
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for raw_b, clean_b in val_loader:
-                raw_b, clean_b = raw_b.to(device), clean_b.to(device)
-                pred = model(raw_b)
-                val_loss += (
-                    criterion(pred, clean_b) + corr_w * _correlation_loss(pred, clean_b)
-                ).item() * raw_b.size(0)
-        val_loss /= len(val_ds)
-
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-
-        scheduler.step(val_loss)
-
-        if val_loss < best_val:
-            best_val = val_loss
-            best_state = copy.deepcopy(model.state_dict())
-
-        if (epoch + 1) % log_interval == 0 or epoch == cfg["epochs"] - 1:
-            lr_now = optimizer.param_groups[0]["lr"]
-            print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {lr_now:.2e}")
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        print(f"Best val loss: {best_val:.6f}")
 
     os.makedirs(save_dir, exist_ok=True)
+    model, history, _, _, _ = train_denoising_core(df_pos, cfg, save_dir, device=device, df_bg=df_bg)
+
     torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pt"))
     print(f"Saved → {save_dir}/best_model.pt")
 
@@ -469,12 +672,14 @@ def main():
     parser = argparse.ArgumentParser(description="Train DAS models.")
     parser.add_argument("--task", required=True, choices=["denoising", "detection", "weight"])
     parser.add_argument("--config", default=None, help="Path to YAML config (default: configs/<task>.yaml)")
+    parser.add_argument("--dataset", default=None,
+                        help="Dataset profile name or path (default: ACTIVE_DATASET in config.py)")
     parser.add_argument("--epochs",   type=int,   default=None, help="Override epochs")
     parser.add_argument("--lr",       type=float, default=None, help="Override learning rate")
     parser.add_argument("--data_dir", type=str,   default=None, help="Override data directory")
     args = parser.parse_args()
 
-    cfg = load_config(args.task, args.config)
+    cfg = load_config(args.task, args.config, dataset=args.dataset)
     apply_overrides(cfg, args)
 
     if args.task == "denoising":
