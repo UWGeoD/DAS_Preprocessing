@@ -17,6 +17,7 @@ import torch
 
 from dataset import IDX_TO_TYPE
 from models.detection_transformer import DASCountTransformer
+from models.unet import UNet
 from models.unet_v2 import UNetV2
 from models.weight_cnn import DASWeightCNN
 from train import load_config
@@ -38,8 +39,12 @@ def predict_denoising(cfg):
     save_dir = cfg.get("save_dir", "results/denoising")
     data_dir = cfg["data_dir"]
 
-    model = UNetV2(in_channels=1, out_channels=1).to(device)
-    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device))
+    model_name = cfg.get("model", "unet_v2")
+    if model_name == "unet":
+        model = UNet(in_channels=1, out_channels=1).to(device)
+    else:
+        model = UNetV2(in_channels=1, out_channels=1).to(device)
+    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=True))
     model.eval()
 
     in_dir  = os.path.join(data_dir, "raw")
@@ -57,11 +62,12 @@ def predict_denoising(cfg):
     with torch.no_grad():
         for fpath in files:
             raw = np.load(fpath).astype(np.float32)
-            mean, std = raw.mean(), raw.std() + 1e-8
-            raw_norm = (raw - mean) / std
+            chan_mean = raw.mean(axis=1, keepdims=True)
+            std = (raw - chan_mean).std() + 1e-8
+            raw_norm = (raw - chan_mean) / std
             t = torch.from_numpy(raw_norm).unsqueeze(0).unsqueeze(0).to(device)
             pred_norm = model(t).squeeze().cpu().numpy()
-            pred = pred_norm * std + mean  # restore original signal units
+            pred = pred_norm * std  # scale back to noise-amplitude units; baseline is ~0 (clean is DC-free)
             np.save(os.path.join(out_dir, f"denoised_{os.path.basename(fpath)}"), pred)
     print("Done.")
 
@@ -79,7 +85,7 @@ def predict_detection(cfg, input_path):
         nhead=cfg.get("nhead", 4),
         num_layers=cfg.get("num_layers", 2),
     ).to(device)
-    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device))
+    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=True))
     model.eval()
 
     t = torch.from_numpy(sample).unsqueeze(0).unsqueeze(0).to(device)
@@ -99,7 +105,7 @@ def predict_weight(cfg, input_path):
     spatial_ch = sample.shape[0]
 
     model = DASWeightCNN(spatial_channels=spatial_ch).to(device)
-    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device))
+    model.load_state_dict(torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=True))
     model.eval()
 
     t = torch.from_numpy(sample).unsqueeze(0).unsqueeze(0).to(device)
@@ -115,10 +121,12 @@ def main():
     parser = argparse.ArgumentParser(description="Run DAS model inference.")
     parser.add_argument("--task", required=True, choices=["denoising", "detection", "weight"])
     parser.add_argument("--config", default=None, help="Path to YAML config (default: configs/<task>.yaml)")
+    parser.add_argument("--dataset", default=None,
+                        help="Dataset profile name or path (default: ACTIVE_DATASET in config.py)")
     parser.add_argument("--input", default=None, help="Path to .npy input file (detection/weight tasks)")
     args = parser.parse_args()
 
-    cfg = load_config(args.task, args.config)
+    cfg = load_config(args.task, args.config, dataset=args.dataset)
 
     if args.task == "denoising":
         predict_denoising(cfg)
