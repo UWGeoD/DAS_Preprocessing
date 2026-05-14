@@ -26,6 +26,7 @@ class DoubleConv(nn.Module):
 class UNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1, features=(32, 64, 128)):
         super().__init__()
+        self._enc_features = tuple(features)
 
         # Encoder
         self.down1 = DoubleConv(in_channels, features[0])
@@ -66,33 +67,36 @@ class UNet(nn.Module):
         # Dropout applied after bottleneck and first two decoder blocks
         self.drop = nn.Dropout2d(p=0.3)
 
-    def forward(self, x):
+    @property
+    def feat_channels(self):
+        return list(self._enc_features) + [self._enc_features[-1] * 2]
+
+    def forward(self, x, return_features=False):
         # ----- Encoder -----
         x1 = self.down1(x)
         x2 = self.down2(self.pool1(x1))
         x3 = self.down3(self.pool2(x2))
-        
+
         # Bottleneck
         x4 = self.drop(self.bottleneck(self.pool3(x3)))
 
         # ----- Decoder -----
-        # Level 3
         up_x = self.up3(x4)
-        # Handle padding/odd shapes: resize up_x to match x3 exactly
         if up_x.shape != x3.shape:
-             up_x = F.interpolate(up_x, size=x3.shape[2:], mode="bilinear", align_corners=True)
+            up_x = F.interpolate(up_x, size=x3.shape[2:], mode="bilinear", align_corners=True)
         x = self.drop(self.dec3(torch.cat([x3, up_x], dim=1)))
 
-        # Level 2
         up_x = self.up2(x)
         if up_x.shape != x2.shape:
-             up_x = F.interpolate(up_x, size=x2.shape[2:], mode="bilinear", align_corners=True)
+            up_x = F.interpolate(up_x, size=x2.shape[2:], mode="bilinear", align_corners=True)
         x = self.drop(self.dec2(torch.cat([x2, up_x], dim=1)))
 
-        # Level 1
         up_x = self.up1(x)
         if up_x.shape != x1.shape:
-             up_x = F.interpolate(up_x, size=x1.shape[2:], mode="bilinear", align_corners=True)
+            up_x = F.interpolate(up_x, size=x1.shape[2:], mode="bilinear", align_corners=True)
         x = self.dec1(torch.cat([x1, up_x], dim=1))
 
-        return self.final_conv(x)
+        out = self.final_conv(x)
+        if return_features:
+            return out, [x1, x2, x3, x4]
+        return out

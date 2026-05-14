@@ -105,6 +105,7 @@ class UNetV2(nn.Module):
     """
     def __init__(self, in_channels=1, out_channels=1, features=(32, 64, 128, 256)):
         super().__init__()
+        self._features = tuple(features)
 
         # Encoder
         self.enc = nn.ModuleList()
@@ -138,7 +139,11 @@ class UNetV2(nn.Module):
 
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
-    def forward(self, x):
+    @property
+    def feat_channels(self):
+        return list(self._features) + [self._features[-1] * 2]
+
+    def forward(self, x, return_features=False):
         # Encoder
         skips = []
         for enc, pool in zip(self.enc, self.pool):
@@ -147,7 +152,8 @@ class UNetV2(nn.Module):
             x = pool(x)
 
         # Bottleneck
-        x = self.drop(self.spp(self.bottleneck(x)))
+        bottleneck_feat = self.drop(self.spp(self.bottleneck(x)))
+        x = bottleneck_feat
 
         # Decoder
         for up, attn, dec, skip in zip(self.up, self.attn, self.dec, reversed(skips)):
@@ -157,4 +163,7 @@ class UNetV2(nn.Module):
             skip = attn(skip)
             x = dec(torch.cat([skip, x], dim=1))
 
-        return self.final_conv(x)
+        out = self.final_conv(x)
+        if return_features:
+            return out, skips + [bottleneck_feat]
+        return out
