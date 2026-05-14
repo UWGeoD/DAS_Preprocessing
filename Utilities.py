@@ -49,6 +49,7 @@ def plot_das_comparison(
     fps_video=None,
     show_signal_shade=False,
     show_signal_ticks=False,
+    show_rect=False,
     sample_id=None,
     figsize=(14, 9),
 ):
@@ -132,18 +133,20 @@ def plot_das_comparison(
 
     # ── Signal region overlays (each independently optional) ──────────────────
     if signal_rects and win_start_frame is not None and fps_video is not None:
-        if show_signal_shade or show_signal_ticks:
-            for ax in (ax_raw, ax_pp, ax_den):
-                for r_s, r_e in signal_rects:
-                    t_s = (r_s - win_start_frame) / fps_video
-                    t_e = (r_e - win_start_frame) / fps_video
-                    if show_signal_shade:
-                        ax.axhspan(t_s, t_e, alpha=0.18, color="#FFA500",
-                                   zorder=2, linewidth=0)
-                    if show_signal_ticks:
-                        for t_m in (t_s, t_e):
-                            ax.axhline(t_m, xmin=0, xmax=0.025,
-                                       color="#E06600", linewidth=2.0, zorder=3)
+        for ax in (ax_raw, ax_pp, ax_den):
+            for r_s, r_e in signal_rects:
+                t_s = (r_s - win_start_frame) / fps_video
+                t_e = (r_e - win_start_frame) / fps_video
+                if show_signal_shade:
+                    ax.axhspan(t_s, t_e, alpha=0.18, color="#FFA500",
+                               zorder=2, linewidth=0)
+                if show_signal_ticks:
+                    for t_m in (t_s, t_e):
+                        ax.axhline(t_m, xmin=0, xmax=0.025,
+                                   color="#E06600", linewidth=2.0, zorder=3)
+            if show_rect:
+                draw_signal_rects(ax, signal_rects, win_start_frame, fps_video,
+                                  x[0], x[-1])
 
     # ── Figure title ──────────────────────────────────────────────────────────
     sid_str = f"Sample {sample_id}" if sample_id is not None else "DAS Comparison"
@@ -287,7 +290,39 @@ def downsample_data(data, original_fs, target_fs):
     return signal.decimate(data, q, axis=1, zero_phase=True)
 
 
-def compute_snr(window, signal_rects, win_start_frame, fps_video, fs_das):
+def draw_signal_rects(ax, signal_rects, win_start_frame, fps_video, x_min, x_max):
+    """
+    Overlay signal_rects as colored rectangles on a DAS heatmap axes.
+
+    Each rect spans the full channel width and its vehicle-signal time interval.
+    Multiple rects get distinct tab10 colors so overlapping vehicles are distinguishable.
+
+    Parameters
+    ----------
+    ax              : matplotlib Axes (y-axis = time in seconds, as produced by plot_das_data)
+    signal_rects    : list of [frame_start, frame_end] global video frame pairs (labels.csv)
+    win_start_frame : start_frame value from labels.csv for this window
+    fps_video       : video frame rate (Hz)
+    x_min, x_max    : channel-position extent of the heatmap (m)
+    """
+    from matplotlib.patches import Rectangle
+
+    colors = plt.cm.tab10.colors
+
+    for i, (r_s, r_e) in enumerate(signal_rects):
+        t_s = (r_s - win_start_frame) / fps_video
+        t_e = (r_e - win_start_frame) / fps_video
+        rgb = colors[i % len(colors)]
+        ax.add_patch(Rectangle(
+            (x_min, t_s), x_max - x_min, t_e - t_s,
+            facecolor=(*rgb, 0.20),
+            edgecolor=(*rgb, 1.0),
+            linewidth=2,
+            zorder=3,
+        ))
+
+
+def compute_snr(window, signal_rects, win_start_frame, fps_video, fs_das, min_samples=200):
     """
     Compute SNR (dB) for a 2D DAS window [channels, time].
 
@@ -300,22 +335,34 @@ def compute_snr(window, signal_rects, win_start_frame, fps_video, fs_das):
     win_start_frame : start_frame value from labels.csv for this window.
     fps_video       : video frame rate used during data prep.
     fs_das          : DAS sampling rate.
+    min_samples     : minimum number of time samples required in both the signal and
+                      noise regions; returns NaN if either is smaller (unreliable estimate).
 
     How it works
     ------------
-    1. Each [frame_start, frame_end] rect is converted to within-window DAS sample
+    1. Per-channel mean is removed from the window before any power computation.
+       Raw DAS carries large per-channel DC offsets (absolute fiber strain levels)
+       that dominate mean(x^2) in both signal and noise regions equally, collapsing
+       SNR to ~0 dB for all samples. Mean removal isolates the AC component where
+       the vehicle signal actually lives.
+    2. Each [frame_start, frame_end] rect is converted to within-window DAS sample
        indices: i = (frame - win_start_frame) / fps_video * fs_das.
-    2. A boolean mask over the time axis is built by OR-ing all rect ranges.
+    3. A boolean mask over the time axis is built by OR-ing all rect ranges.
        Overlapping rects are handled automatically — e.g. [1,3] and [2,4]
        both set their index ranges to True, giving a union of [1,4] with no
        sample counted twice.
-    3. Signal region  = window[:, signal_mask]  (all channels, signal time)
+    4. Signal region  = window[:, signal_mask]  (all channels, signal time)
        Noise region   = window[:, ~signal_mask] (all channels, remaining time)
-    4. SNR = 10 * log10( mean(signal^2) / mean(noise^2) )
+    5. SNR = 10 * log10( mean(signal^2) / mean(noise^2) )
        Mean is taken over all elements (channels × time) in each region.
+       Returns NaN if either region has fewer than min_samples time steps.
     """
     if not signal_rects:
         return float("nan")
+
+    # Remove per-channel DC offset so power estimates reflect the AC signal only.
+    chan_mean = window.mean(axis=1, keepdims=True)
+    window = window - chan_mean
 
     n_time = window.shape[1]
     signal_mask = np.zeros(n_time, dtype=bool)
@@ -331,6 +378,9 @@ def compute_snr(window, signal_rects, win_start_frame, fps_video, fs_das):
     noise_mask = ~signal_mask
 
     if not signal_mask.any() or not noise_mask.any():
+        return float("nan")
+
+    if signal_mask.sum() < min_samples or noise_mask.sum() < min_samples:
         return float("nan")
 
     signal_power = np.mean(window[:, signal_mask] ** 2)
