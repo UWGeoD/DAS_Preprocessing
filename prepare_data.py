@@ -3,12 +3,13 @@ CLI for DAS data preparation.
 
 Reads raw HDF5 files, slices into fixed-length windows, maps manual vehicle
 labels to per-window counts/types/signal_rects, and writes:
-  - data/raw/sample_XXXXXX.npy  (one per window)
-  - data/labels.csv
+  - data/<dataset>/raw/sample_XXXXXX.npy  (one per window)
+  - data/<dataset>/labels.csv
 
 Usage:
     python prepare_data.py
-    python prepare_data.py --config configs/data_prep.yaml
+    python prepare_data.py --dataset newville_nov2025
+    python prepare_data.py --dataset configs/datasets/newville_nov2025.yaml
 """
 
 import argparse
@@ -31,8 +32,8 @@ from DAS import MulDAS
 # Time / frame helpers
 # ---------------------------------------------------------------------------
 
-def _hms_to_seconds(hms: str) -> int:
-    return sum(int(x) * m for x, m in zip(hms.split(":"), [3600, 60, 1]))
+def _hms_to_seconds(hms: str) -> float:
+    return sum(float(x) * m for x, m in zip(hms.split(":"), [3600, 60, 1]))
 
 
 def _frame_to_das_seconds(
@@ -99,6 +100,7 @@ def prepare_das_windows_and_labels(
     csv_out: str = "../labels.csv",
     start_frame_col: str = "frame_start",
     end_frame_col: str = "frame_end_bridge",
+    label_mode: str = "estimated_end",
     multi_token: str = "mixed",
     none_token: Optional[str] = None,
     shuffle_samples: bool = False,
@@ -111,8 +113,11 @@ def prepare_das_windows_and_labels(
       sample_id, data_path, count, start_frame, end_frame, vehicle_type, signal_rects
 
     signal_rects: JSON list of [frame_start, frame_end] pairs (global video frames,
-    clipped to the window's frame range) marking the ~1-second signal rectangle
-    for each vehicle in the window.  [] for background windows.
+    clipped to the window's frame range) marking the signal region for each vehicle.
+
+    label_mode controls how signal_rects are computed:
+      "estimated_end": [frame_start - 3, frame_start + 27] (fixed 1-second offset)
+      "actual_end":    [frame_start, frame_end] (uses the labeled end frame directly)
     """
     if isinstance(labels_csv_or_df, (str, Path)):
         df_lbl = pd.read_csv(labels_csv_or_df)
@@ -148,7 +153,8 @@ def prepare_das_windows_and_labels(
         f.unlink()
 
     events_np = df_lbl[["start_s", "end_s"]].to_numpy()
-    veh_frames = df_lbl[start_frame_col].to_numpy(dtype=float)
+    veh_start_frames = df_lbl[start_frame_col].to_numpy(dtype=float)
+    veh_end_frames = df_lbl[end_frame_col].to_numpy(dtype=float)
 
     # Constants for frame back-map
     das0 = _hms_to_seconds(das_start_hms)
@@ -186,9 +192,13 @@ def prepare_das_windows_and_labels(
         # signal_rects: one rect per overlapping vehicle, clipped to window
         signal_rects = []
         for i in np.where(mask)[0]:
-            vf = veh_frames[i]
-            rect_s = int(vf - 3)
-            rect_e = int(vf + 27)
+            if label_mode == "actual_end":
+                rect_s = int(veh_start_frames[i])
+                rect_e = int(veh_end_frames[i])
+            else:  # estimated_end
+                vf = veh_start_frames[i]
+                rect_s = int(vf - 3)
+                rect_e = int(vf + 27)
             clipped_s = max(rect_s, win_start_frame)
             clipped_e = min(rect_e, win_end_frame)
             if clipped_s < clipped_e:
@@ -247,37 +257,50 @@ def prepare_das_windows_and_labels(
 def main():
     parser = argparse.ArgumentParser(description="Prepare DAS windows and labels.")
     parser.add_argument(
-        "--config", default="configs/data_prep.yaml",
-        help="Path to data_prep YAML config (default: configs/data_prep.yaml)",
+        "--dataset", default=None,
+        help=(
+            "Dataset profile name (e.g. newville_nov2025) or path to a dataset YAML. "
+            "Defaults to ACTIVE_DATASET in config.py."
+        ),
     )
     args = parser.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    from config import load_dataset_config
+    cfg = load_dataset_config(args.dataset)
 
-    from config import DAS_RECORDING_DIR, LABELING_CSV
+    label_mode = cfg.get("label_mode", "estimated_end")
+    print(f"Dataset: {cfg.get('recording_dir', '?')}  label_mode: {label_mode}")
 
     # Load DAS recordings
-    files = sorted(glob.glob(os.path.join(DAS_RECORDING_DIR, "*Newville*")))
+    recording_dir = cfg["recording_dir"]
+    file_pattern = cfg.get("file_pattern", "*.h5")
+    files = sorted(glob.glob(os.path.join(recording_dir, file_pattern)))
     if not files:
-        raise FileNotFoundError(f"No DAS files found in {DAS_RECORDING_DIR}")
+        raise FileNotFoundError(
+            f"No DAS files matching '{file_pattern}' found in {recording_dir}"
+        )
     channels = np.arange(cfg["channel_start"], cfg["channel_end"])
     muldas = MulDAS(files, channels)
     das_array = muldas.data
     print(f"Loaded DAS array: {das_array.shape}")
 
-    # Load and adjust vehicle labels
-    vehicle_label = pd.read_csv(LABELING_CSV)
-    vehicle_label_adjusted = add_frame_end_bridge(
-        df=vehicle_label,
-        estimate_speed=cfg["estimate_speed_mph"],
-        side_length_ft=cfg["side_length_ft"],
-        bridge_length_m=cfg["bridge_length_m"],
-        fps_video=cfg["fps_video"],
-        speed_unit="mph",
-        frame_col="frame_start",
-        out_col="frame_end_bridge",
-    )
+    # Load vehicle labels and resolve frame_end
+    vehicle_label = pd.read_csv(cfg["labeling_csv"])
+
+    if label_mode == "estimated_end":
+        vehicle_label = add_frame_end_bridge(
+            df=vehicle_label,
+            estimate_speed=cfg["estimate_speed_mph"],
+            side_length_ft=cfg["side_length_ft"],
+            bridge_length_m=cfg["bridge_length_m"],
+            fps_video=cfg["fps_video"],
+            speed_unit="mph",
+            frame_col="frame_start",
+            out_col="frame_end_bridge",
+        )
+        end_frame_col = "frame_end_bridge"
+    else:  # actual_end
+        end_frame_col = "frame_end"
 
     # Clear stale samples from a previous run
     out_dir_path = Path(cfg["out_dir"])
@@ -289,7 +312,7 @@ def main():
 
     prepare_das_windows_and_labels(
         das_array=das_array,
-        labels_csv_or_df=vehicle_label_adjusted,
+        labels_csv_or_df=vehicle_label,
         window_length_s=cfg["window_length_s"],
         stride_s=cfg["stride_s"],
         fs_das=cfg["fs_das"],
@@ -300,7 +323,8 @@ def main():
         out_dir=cfg["out_dir"],
         csv_out=cfg["csv_out"],
         start_frame_col="frame_start",
-        end_frame_col="frame_end_bridge",
+        end_frame_col=end_frame_col,
+        label_mode=label_mode,
         multi_token=cfg["multi_token"],
         none_token=cfg["none_token"],
         shuffle_samples=cfg.get("shuffle_samples", False),
